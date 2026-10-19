@@ -61,7 +61,9 @@ class Store:
               ON CONFLICT(account,friend) DO UPDATE SET
               desired_name=excluded.desired_name, desired_avatar=excluded.desired_avatar,
               avatar_hash=excluded.avatar_hash, state=excluded.state,
-              scope=excluded.scope, last_verified=NULL, last_applied=NULL''',
+              scope=excluded.scope, last_verified=NULL, last_applied=NULL
+              WHERE NOT (profiles.desired_avatar IS excluded.desired_avatar
+                         AND profiles.desired_name IS excluded.desired_name)''',
               (account, friend, original_name, original_avatar, name, avatar,
                digest(avatar) if avatar else None, State.UNKNOWN.value,
                '仅保存配置，尚未应用至微信'))

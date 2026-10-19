@@ -8,6 +8,7 @@ from contextlib import closing
 import tempfile
 from .cipher_stage import open_cipher, verify_pages
 from .offline import OfflineError, validate_context
+from .wal import validate_wal
 
 def read_current(context, friends, *, _validate=validate_context):
     _validate(context)
@@ -33,6 +34,7 @@ def read_current(context, friends, *, _validate=validate_context):
                 if not stable: continue
                 path=Path(temp)/'head_image.db'
                 verify_pages(path,context.key)
+                validate_wal(files[''],files.get('-wal'),context.key)
                 with closing(open_cipher(path,context.key)) as db:
                     if db.execute('PRAGMA cipher_integrity_check').fetchall():
                         raise OfflineError('加密数据库完整性校验失败')

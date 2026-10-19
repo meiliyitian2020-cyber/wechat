@@ -1,11 +1,12 @@
 """Experimental offline avatar writeback. No contact/name writes, no hooks.
 
 Writes only head_image.db while holding a Windows exclusive handle. WAL/SHM
-presence is rejected. A durable encrypted backup and journal precede mutation.
+are captured under exclusive handles. SQLCipher checkpoints only a private copy.
+A durable backup of all original files and a journal precede mutation.
 This does not prove which cache the WeChat client renders.
 """
 from __future__ import annotations
-from contextlib import closing
+from contextlib import closing, ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 import ctypes
@@ -19,6 +20,7 @@ from .cipher_stage import open_cipher, verify_pages, CipherError
 from .core import now
 from .windows import ensure_wechat_stopped, version, TARGET, check_read_version, check_write_version, WRITE_VERSIONS
 from .compatibility import inspect_head, other_rows_digest, CompatibilityError
+from .wal import validate_wal
 
 class OfflineError(RuntimeError):
     pass
@@ -117,9 +119,78 @@ def validate_executable(context):
     except RuntimeError as exc:
         raise OfflineError(str(exc)) from None
 
-def no_sidecars(source):
-    if any(Path(str(source)+suffix).exists() for suffix in ('-wal','-shm')):
-        raise OfflineError('头像库仍有 WAL/SHM。请正常退出微信后重试；不要手动删除这些文件。')
+SUFFIXES=('', '-wal', '-shm')
+BACKUP_NAMES={'':'original.enc','-wal':'wal.enc','-shm':'shm.bin'}
+
+def fingerprint(snapshot):
+    return hash_bytes(json.dumps({suffix:hash_bytes(data) if data is not None else None
+                                 for suffix,data in snapshot.items()},sort_keys=True).encode())
+
+class SourceSet:
+    """Hold main DB and every existing sidecar exclusively. Never delete files."""
+    def __init__(self,source,lock,guard):
+        self.source,self.lock,self.guard=source,lock,guard
+    def __enter__(self):
+        self.stack=ExitStack();self.handles={}
+        try:
+            self.guard()
+            for suffix in SUFFIXES:
+                path=Path(str(self.source)+suffix)
+                if path.is_symlink() or getattr(path,'is_junction',lambda:False)():
+                    raise OfflineError('头像库或日志文件为链接，已停止操作')
+                if path.exists(): self.handles[suffix]=self.stack.enter_context(self.lock(path))
+                elif suffix=='': raise OfflineError('头像库不存在')
+            self.guard();self.assert_presence()
+            return self
+        except BaseException:
+            self.stack.close();raise
+    def __exit__(self,*args): self.stack.close()
+    def assert_presence(self):
+        for suffix in SUFFIXES:
+            if Path(str(self.source)+suffix).exists()!=(suffix in self.handles):
+                raise OfflineError('头像库或日志的存在状态发生变化，已停止操作')
+    def read(self):
+        self.assert_presence()
+        data={suffix:self.handles[suffix].read() if suffix in self.handles else None for suffix in SUFFIXES}
+        if sum(len(value) for value in data.values() if value is not None)>512*1024*1024:
+            raise OfflineError('头像库及日志总大小超过当前安全处理上限')
+        return data
+    def write(self,data,fault=None):
+        self.assert_presence()
+        for suffix,phase in zip(SUFFIXES,('after_main','after_wal','after_shm')):
+            if suffix in self.handles:
+                if data[suffix] is None: raise OfflineError('禁止自动删除原始文件')
+                self.handles[suffix].write(data[suffix])
+                if fault: fault(phase)
+            elif data[suffix] is not None:
+                raise OfflineError('原日志状态不匹配，禁止创建未知日志')
+        self.assert_presence()
+
+def checkpoint_copy(db):
+    row=db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+    if not row or row[0]!=0: raise OfflineError('临时副本日志合并未完成，未改动原文件')
+
+def prepare_copy(snapshot,key,temp):
+    path=Path(temp)/'head_image.db'
+    path.write_bytes(snapshot[''])
+    verify_pages(path,key)
+    try:
+        stats=validate_wal(snapshot[''],snapshot['-wal'],key)
+    except CipherError as exc:
+        raise OfflineError(str(exc)) from None
+    if snapshot['-wal']:
+        Path(str(path)+'-wal').write_bytes(snapshot['-wal'])
+    # SHM is a process-specific index. Rebuild it in the copy; never copy it in.
+    with closing(open_cipher(path,key)) as db:
+        if stats['committed_wal_frames'] and db.execute('PRAGMA journal_mode').fetchone()[0].lower()!='wal':
+            raise OfflineError('日志与主库的模式不一致，未改动原文件')
+        if db.execute('PRAGMA cipher_integrity_check').fetchall():
+            raise OfflineError('临时副本加密校验失败，未改动原文件')
+        checkpoint_copy(db)
+    verify_pages(path,key)
+    if Path(str(path)+'-wal').exists() and Path(str(path)+'-wal').stat().st_size:
+        raise OfflineError('临时副本仍有未合并日志，未改动原文件')
+    return path,stats
 
 class OfflineAvatar:
     def __init__(self,backup_root,*,_lock=WindowsFile,_guard=ensure_wechat_stopped,_validate=validate_context,_version=validate_executable,_read_version=validate_read_executable):
@@ -128,177 +199,176 @@ class OfflineAvatar:
         self.check_read_version=_read_version
         self._probes={}
 
-    def apply(self,context,friend,avatar,*,_fault=None,_invalidate=False,_candidate_trial=False):
-        if not friend or (not avatar and not _invalidate): raise OfflineError('未选择好友或自定义头像')
-        self.validate(context)
-        trial=_candidate_trial and context.detected_version not in WRITE_VERSIONS
-        proof_key=(id(context),friend,bool(_invalidate))
-        proof=None
-        if trial:
-            self.check_read_version(context)
-            proof=self._probes.get(proof_key)
-            if (not proof or proof['version']!=context.detected_version
-                    or proof['source_path']!=str(context.source.absolute()) or proof['account']!=context.account
-                    or proof['avatar_hash']!=hash_bytes(avatar or b'') or time.monotonic()-proof['time']>300):
-                raise OfflineError('需要先对当前好友和图片完成本次副本检查；检查凭据已缺失或过期')
-        else:
-            self.check_version(context)
-        self.guard();no_sidecars(context.source)
-        source_path=context.source.resolve(strict=True)
-        root=self.backup_root.resolve()
-        if root.is_relative_to(context.account_root.resolve()):
-            raise OfflineError('备份目录必须位于微信账号目录之外')
-        root.mkdir(parents=True,exist_ok=True)
-        # Unresolved prior operations block subsequent writes to this account.
-        for path in root.glob('*/operation.json'):
-            record=json.loads(path.read_text(encoding='utf-8'))
-            if record.get('account')==context.account and record.get('state') in {'prepared','writing','recovery_required'}:
-                raise OfflineError('此账号存在未完成操作，请先执行故障恢复')
-        with self.lock(context.source) as locked:
-            self.guard();no_sidecars(context.source)
-            original=locked.read()
-            if trial and hash_bytes(original)!=proof['source_hash']:
-                raise OfflineError('原始头像库在副本检查后发生变化，请重新检查，禁止沿用旧检查结果')
-            with tempfile.TemporaryDirectory(prefix='avatar-transaction-') as temp:
-                stage=Path(temp)/'head_image.db';stage.write_bytes(original)
-                verify_pages(stage,context.key)
-                with closing(open_cipher(stage,context.key)) as db:
-                    inspect_head(db)
-                    other_before=other_rows_digest(db,friend)
-                    db.execute('PRAGMA foreign_keys=ON')
-                    with db:
-                        db.execute('BEGIN IMMEDIATE')
-                        rows=db.execute('SELECT image_buffer FROM head_image WHERE username=?',(friend,)).fetchall()
-                        if len(rows)!=1: raise OfflineError('目标好友头像记录缺失或不唯一')
-                        if _invalidate:
-                            db.execute('DELETE FROM head_image WHERE username=?',(friend,))
-                        else:
-                            db.execute('UPDATE head_image SET image_buffer=?,md5=?,update_time=? WHERE username=?',
-                                       (avatar,hashlib.md5(avatar).hexdigest(),int(__import__('time').time()),friend))
-                verify_pages(stage,context.key)
-                with closing(open_cipher(stage,context.key)) as db:
-                    if other_rows_digest(db,friend)!=other_before:
-                        raise OfflineError('暂存修改影响了其他好友，已拒绝写回')
-                    if not self._matches(db,friend,avatar,_invalidate):
-                        raise OfflineError('目标头像校验失败')
-                replacement=stage.read_bytes()
-                self.guard()
-                if trial: self.check_read_version(context)
-                else: self.check_version(context)
-                no_sidecars(context.source)
-                if trial:
-                    if time.monotonic()-proof['time']>300 or self._probes.get(proof_key) is not proof:
-                        raise OfflineError('副本检查凭据已过期或被使用，请重新检查')
-                    self._probes.pop(proof_key)
-                if locked.read()!=original: raise OfflineError('头像库已发生变化，禁止继续')
-                bundle=root/uuid.uuid4().hex;bundle.mkdir()
-                durable(bundle/'original.enc',original)
-                record={'schema':1,'account':context.account,'friend':friend,'action':'invalidate' if _invalidate else 'apply','source':str(source_path),
-                        'wechat_version':context.detected_version,'candidate_trial':bool(trial),
-                        'state':'prepared','created':now(),'original_hash':hash_bytes(original),
-                        'replacement_hash':hash_bytes(replacement),'wal_present':False,'shm_present':False}
-                jp=bundle/'operation.json';journal(jp,record)
-                try:
-                    record['state']='writing';journal(jp,record)
-                    if _fault: _fault('before_write')
-                    locked.write(replacement)
-                    if _fault: _fault('after_write')
-                    if locked.read()!=replacement: raise OfflineError('写入后文件校验失败')
-                    # Reopen a copy of the actual bytes read from the exclusive handle.
-                    stage.write_bytes(locked.read());verify_pages(stage,context.key)
-                    with closing(open_cipher(stage,context.key)) as db:
-                        if not self._matches(db,friend,avatar,_invalidate):
-                            raise OfflineError('实际写入记录验证失败')
-                    record['state']='committed';record['completed']=now();journal(jp,record)
-                except BaseException:
-                    try:
-                        locked.write(original)
-                        if locked.read()!=original: raise OfflineError('回滚文件校验失败')
-                        record['state']='rolled_back';journal(jp,record)
-                    except BaseException:
-                        record['state']='recovery_required';journal(jp,record)
-                        raise OfflineError('回滚未完成，请保持微信关闭，保留工具备份并执行故障恢复') from None
-                    raise OfflineError('写入失败，已恢复操作前的加密头像库') from None
-        return str(bundle)
-
-    def probe(self,context,friend,avatar,*,_invalidate=False):
-        """Offline dry-run on a private encrypted copy. Original is never written."""
-        if not friend or (not avatar and not _invalidate): raise OfflineError('请先选择测试好友和自定义头像')
-        self.validate(context);self.guard();no_sidecars(context.source)
-        with self.lock(context.source) as locked:
-            self.guard();no_sidecars(context.source)
-            original=locked.read()
-            with tempfile.TemporaryDirectory(prefix='avatar-compatibility-') as temp:
-                path=Path(temp)/'head_image.db';path.write_bytes(original)
-                verify_pages(path,context.key)
-                with closing(open_cipher(path,context.key)) as db:
-                    metadata=inspect_head(db)
-                    before=other_rows_digest(db,friend)
-                    db.execute('PRAGMA foreign_keys=ON')
-                    with db:
-                        db.execute('BEGIN IMMEDIATE')
-                        if db.execute('SELECT count(*) FROM head_image WHERE username=?',(friend,)).fetchone()[0]!=1:
-                            raise OfflineError('测试好友头像记录缺失或不唯一')
-                        if _invalidate:
-                            db.execute('DELETE FROM head_image WHERE username=?',(friend,))
-                        else:
-                            db.execute('UPDATE head_image SET image_buffer=?,md5=?,update_time=? WHERE username=?',
-                                       (avatar,hashlib.md5(avatar).hexdigest(),int(time.time()),friend))
-                verify_pages(path,context.key)
-                with closing(open_cipher(path,context.key)) as db:
-                    if not self._matches(db,friend,avatar,_invalidate): raise OfflineError('副本目标记录验证失败')
-                    if other_rows_digest(db,friend)!=before: raise OfflineError('副本修改影响了其他好友')
-                    if db.execute('PRAGMA foreign_key_check').fetchall(): raise OfflineError('副本关联完整性检查失败')
-                    engine=db.execute('PRAGMA cipher_version').fetchone()[0]
-                    if inspect_head(db)!=metadata: raise OfflineError('副本表结构发生变化')
-                self.guard();self.check_read_version(context);no_sidecars(context.source)
-                if locked.read()!=original: raise OfflineError('源文件发生变化，检查结果无效')
-                self._probes[(id(context),friend,bool(_invalidate))]={
-                    'source_path':str(context.source.absolute()),'account':context.account,
-                    'source_hash':hash_bytes(original),'avatar_hash':hash_bytes(avatar or b''),
-                    'version':context.detected_version,'time':time.monotonic()}
-                return {'report_version':1,'wechat_version':context.detected_version,
-                        'operation':'invalidate' if _invalidate else 'apply',
-                        'cipher_version':engine,'page_size':4096,'reserve_bytes':80,
-                        'source_unchanged':True,'all_page_hmac_ok':True,'roundtrip_ok':True,
-                        'non_target_rows_unchanged':True,'original_database_written':False,
-                        'client_rendering_verified':False,**metadata}
-
     @staticmethod
     def _matches(db,friend,avatar,invalidate):
         rows=db.execute('SELECT image_buffer FROM head_image WHERE username=?',(friend,)).fetchall()
         return not rows if invalidate else len(rows)==1 and rows[0][0]==avatar
 
+    def _mutate(self,path,key,friend,avatar,invalidate):
+        with closing(open_cipher(path,key)) as db:
+            metadata=inspect_head(db);before=other_rows_digest(db,friend)
+            db.execute('PRAGMA foreign_keys=ON')
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                if db.execute('SELECT count(*) FROM head_image WHERE username=?',(friend,)).fetchone()[0]!=1:
+                    raise OfflineError('目标好友头像记录缺失或不唯一')
+                if invalidate: db.execute('DELETE FROM head_image WHERE username=?',(friend,))
+                else:
+                    db.execute('UPDATE head_image SET image_buffer=?,md5=?,update_time=? WHERE username=?',
+                               (avatar,hashlib.md5(avatar).hexdigest(),int(time.time()),friend))
+            checkpoint_copy(db)
+        verify_pages(path,key)
+        with closing(open_cipher(path,key)) as db:
+            if not self._matches(db,friend,avatar,invalidate): raise OfflineError('副本目标记录验证失败')
+            if other_rows_digest(db,friend)!=before: raise OfflineError('副本修改影响了其他好友')
+            if db.execute('PRAGMA foreign_key_check').fetchall(): raise OfflineError('副本关联完整性检查失败')
+            if inspect_head(db)!=metadata: raise OfflineError('副本表结构发生变化')
+            engine=db.execute('PRAGMA cipher_version').fetchone()[0]
+        return metadata,engine
+
+    def _check_proof(self,context,friend,avatar,invalidate):
+        key=(id(context),friend,bool(invalidate));proof=self._probes.get(key)
+        if (not proof or proof['version']!=context.detected_version
+                or proof['source_path']!=str(context.source.absolute()) or proof['account']!=context.account
+                or proof['avatar_hash']!=hash_bytes(avatar or b'') or time.monotonic()-proof['time']>300):
+            raise OfflineError('需要先对当前好友和图片完成本次副本检查；检查凭据已缺失或过期')
+        return key,proof
+
+    def apply(self,context,friend,avatar,*,_fault=None,_invalidate=False,_candidate_trial=False):
+        if not friend or (not avatar and not _invalidate): raise OfflineError('未选择好友或自定义头像')
+        self.validate(context)
+        trial=_candidate_trial and context.detected_version not in WRITE_VERSIONS
+        proof_key=proof=None
+        if trial:
+            self.check_read_version(context)
+            proof_key,proof=self._check_proof(context,friend,avatar,_invalidate)
+        else: self.check_version(context)
+        self.guard()
+        source_path=context.source.resolve(strict=True)
+        root=self.backup_root.resolve()
+        if root.is_relative_to(context.account_root.resolve()): raise OfflineError('备份目录必须位于微信账号目录之外')
+        root.mkdir(parents=True,exist_ok=True)
+        for jp in root.glob('*/operation.json'):
+            record=json.loads(jp.read_text(encoding='utf-8'))
+            if record.get('account')==context.account and record.get('state') in {'prepared','writing','recovery_required'}:
+                raise OfflineError('此账号存在未完成操作，请先执行故障恢复')
+        with SourceSet(context.source,self.lock,self.guard) as source:
+            original=source.read()
+            if trial and fingerprint(original)!=proof['source_hash']:
+                raise OfflineError('原始头像库或日志在副本检查后发生变化，请重新检查')
+            with tempfile.TemporaryDirectory(prefix='avatar-transaction-') as temp:
+                stage,_=prepare_copy(original,context.key,temp)
+                self._mutate(stage,context.key,friend,avatar,_invalidate)
+                replacement={'':stage.read_bytes(),'-wal':b'' if original['-wal'] is not None else None,
+                             '-shm':b'' if original['-shm'] is not None else None}
+                self.guard()
+                if trial:
+                    self.check_read_version(context)
+                    if self._check_proof(context,friend,avatar,_invalidate)[1] is not proof:
+                        raise OfflineError('副本检查凭据已被替换')
+                else: self.check_version(context)
+                if source.read()!=original: raise OfflineError('头像库或日志已发生变化，禁止继续')
+                bundle=root/uuid.uuid4().hex;bundle.mkdir()
+                files={}
+                for suffix in SUFFIXES:
+                    data=original[suffix]
+                    if data is not None: durable(bundle/BACKUP_NAMES[suffix],data)
+                    files[suffix]={'original_hash':hash_bytes(data) if data is not None else None,
+                                   'replacement_hash':hash_bytes(replacement[suffix]) if replacement[suffix] is not None else None,
+                                   'backup':BACKUP_NAMES[suffix] if data is not None else None}
+                record={'schema':2,'account':context.account,'friend':friend,'action':'invalidate' if _invalidate else 'apply',
+                        'source':str(source_path),'wechat_version':context.detected_version,'candidate_trial':bool(trial),
+                        'state':'prepared','created':now(),'files':files,'original_hash':hash_bytes(original['']),
+                        'replacement_hash':hash_bytes(replacement['']),'wal_present':original['-wal'] is not None,
+                        'shm_present':original['-shm'] is not None}
+                jp=bundle/'operation.json';journal(jp,record)
+                if trial: self._probes.pop(proof_key)
+                try:
+                    record['state']='writing';journal(jp,record)
+                    if _fault: _fault('before_write')
+                    source.write(replacement,_fault)
+                    if _fault: _fault('after_write')
+                    actual=source.read()
+                    if actual!=replacement: raise OfflineError('写入后文件集合校验失败')
+                    with tempfile.TemporaryDirectory(prefix='avatar-readback-') as verify_temp:
+                        verified,_=prepare_copy(actual,context.key,verify_temp)
+                        with closing(open_cipher(verified,context.key)) as db:
+                            if not self._matches(db,friend,avatar,_invalidate): raise OfflineError('实际写入记录验证失败')
+                    record['state']='committed';record['completed']=now();journal(jp,record)
+                except BaseException:
+                    try:
+                        source.write(original)
+                        if source.read()!=original: raise OfflineError('回滚文件集合校验失败')
+                        record['state']='rolled_back';journal(jp,record)
+                    except BaseException:
+                        record['state']='recovery_required';journal(jp,record)
+                        raise OfflineError('回滚未完成，请保持微信关闭，保留工具备份并执行故障恢复') from None
+                    raise OfflineError('写入失败，已恢复操作前的主库和全部日志文件') from None
+        return str(bundle)
+
+    def probe(self,context,friend,avatar,*,_invalidate=False):
+        if not friend or (not avatar and not _invalidate): raise OfflineError('请先选择测试好友和自定义头像')
+        self.validate(context);self.guard()
+        with SourceSet(context.source,self.lock,self.guard) as source:
+            original=source.read()
+            with tempfile.TemporaryDirectory(prefix='avatar-compatibility-') as temp:
+                path,stats=prepare_copy(original,context.key,temp)
+                metadata,engine=self._mutate(path,context.key,friend,avatar,_invalidate)
+                self.guard();self.check_read_version(context)
+                if source.read()!=original: raise OfflineError('源库或日志发生变化，检查结果无效')
+                self._probes[(id(context),friend,bool(_invalidate))]={
+                    'source_path':str(context.source.absolute()),'account':context.account,
+                    'source_hash':fingerprint(original),'avatar_hash':hash_bytes(avatar or b''),
+                    'version':context.detected_version,'time':time.monotonic()}
+                return {'report_version':2,'wechat_version':context.detected_version,
+                        'operation':'invalidate' if _invalidate else 'apply','cipher_version':engine,
+                        'page_size':4096,'reserve_bytes':80,'source_unchanged':True,'all_page_hmac_ok':True,
+                        'roundtrip_ok':True,'non_target_rows_unchanged':True,'original_database_written':False,
+                        'client_rendering_verified':False,'wal_present':original['-wal'] is not None,
+                        'shm_present':original['-shm'] is not None,**stats,**metadata}
+
     def invalidate(self,context,friend,*,_candidate_trial=False):
-        # Request WeChat to fetch an avatar, rather than reinstating a stale backup.
         return self.apply(context,friend,None,_invalidate=True,_candidate_trial=_candidate_trial)
 
     def recover(self,account,*,context=None):
-        """Recover interrupted operations only when no third-party changes exist."""
         if context is not None:
             self.validate(context)
             if context.account!=account: raise OfflineError('恢复账号不匹配')
-        elif self.lock is WindowsFile:
-            raise OfflineError('恢复前需要读取账号并确认微信版本')
+        elif self.lock is WindowsFile: raise OfflineError('恢复前需要读取账号并确认微信版本')
         count=0
         for jp in self.backup_root.glob('*/operation.json'):
             record=json.loads(jp.read_text(encoding='utf-8'))
             if record.get('account')!=account or record.get('state') not in {'prepared','writing','recovery_required'}: continue
             if context is not None and record.get('wechat_version',TARGET)!=context.detected_version:
                 raise OfflineError('恢复记录与当前微信版本不匹配，禁止跨版本恢复')
-            source=Path(record['source'])
-            if context is not None and source!=context.source.resolve(): raise OfflineError('恢复来源与当前账号不匹配')
-            original=(jp.parent/'original.enc').read_bytes()
-            if source.name!='head_image.db' or hash_bytes(original)!=record['original_hash']:
-                raise OfflineError('恢复备份校验失败')
-            self.guard();no_sidecars(source)
-            with self.lock(source) as locked:
-                self.guard();no_sidecars(source)
+            path=Path(record['source'])
+            if path.name!='head_image.db' or (context is not None and path!=context.source.resolve()):
+                raise OfflineError('恢复来源与当前账号不匹配')
+            files=record.get('files')
+            if files is None:
+                files={suffix:{'original_hash':record['original_hash'] if suffix=='' else None,
+                               'replacement_hash':record['replacement_hash'] if suffix=='' else None,
+                               'backup':'original.enc' if suffix=='' else None} for suffix in SUFFIXES}
+            if set(files)!=set(SUFFIXES): raise OfflineError('恢复清单格式不完整')
+            original={}
+            for suffix in SUFFIXES:
+                info=files[suffix]
+                if info['backup'] is not None:
+                    if info['backup']!=BACKUP_NAMES[suffix]: raise OfflineError('恢复备份路径无效')
+                    original[suffix]=(jp.parent/info['backup']).read_bytes()
+                    if hash_bytes(original[suffix])!=info['original_hash']: raise OfflineError('恢复备份校验失败')
+                else:
+                    if info['original_hash'] is not None: raise OfflineError('恢复备份缺失')
+                    original[suffix]=None
+            self.guard()
+            with SourceSet(path,self.lock,self.guard) as source:
                 if context is not None: self.check_read_version(context)
-                current=hash_bytes(locked.read())
-                if current not in {record['original_hash'],record['replacement_hash']}:
-                    raise OfflineError('检测到部分写入或微信后续变化，无法自动区分。已停止恢复以保护现有数据。')
-                locked.write(original)
-                if hash_bytes(locked.read())!=record['original_hash']: raise OfflineError('恢复验证失败')
+                current=source.read()
+                for suffix,data in current.items():
+                    actual=hash_bytes(data) if data is not None else None
+                    if actual not in {files[suffix]['original_hash'],files[suffix]['replacement_hash']}:
+                        raise OfflineError('检测到部分写入或微信后续变化，无法自动区分。已停止恢复以保护现有数据。')
+                source.write(original)
+                if source.read()!=original: raise OfflineError('恢复验证失败')
                 record['state']='rolled_back';journal(jp,record);count+=1
         return count

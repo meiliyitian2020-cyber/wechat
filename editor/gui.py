@@ -55,7 +55,7 @@ class Window(QMainWindow):
         self.offline = OfflineAvatar(store.path.parent / 'backups')
         self.expired = []
         self.pending_avatar = None
-        self.setWindowTitle('微信本地身份工具 · 实验性离线头像替换')
+        self.setWindowTitle('微信本地身份工具 · 实验性离线头像替换 · WAL修正版')
         self.resize(1020, 640)
         box = QWidget(); self.setCentralWidget(box)
         layout = QVBoxLayout(box)
@@ -188,7 +188,7 @@ class Window(QMainWindow):
         try:
             self.store.save(self.account,c['username'],c['nick_name'] or '',self.avatars.get(c['username']),
                             self.name.text().strip() or None,self.pending_avatar)
-            self.render(); self.status.setText('配置已持久保存；未修改微信，状态为无法验证。')
+            self.render(); self.status.setText('配置已持久保存；此步骤未写入微信。')
         except ValueError as exc:
             QMessageBox.warning(self,'无法保存',str(exc))
 
@@ -267,12 +267,15 @@ class Window(QMainWindow):
                 '保持工具打开，完全退出微信及托盘后再确认。\n仅在临时加密副本中测试修改，不写入原始微信数据库。',
                 QMessageBox.StandardButton.Ok|QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel)!=QMessageBox.StandardButton.Ok: return
+            if not _restore:
+                self.store.save(self.account,c['username'],c['nick_name'] or '',self.avatars.get(c['username']),
+                                self.name.text().strip() or None,self.pending_avatar)
             report=self.offline.probe(context,c['username'],None if _restore else self.pending_avatar,_invalidate=_restore)
             text=json.dumps(report,ensure_ascii=False,indent=2)
             path=self.store.path.parent/('compatibility-'+uuid.uuid4().hex+'.json')
             path.write_text(text,encoding='utf-8')
             box=QMessageBox(self);box.setWindowTitle('副本兼容性检查通过')
-            box.setText('加密副本写入、读回和其他好友记录校验通过；原始头像库未改动。\n报告不含好友 ID、昵称、头像、数据路径或密钥。默认不写原库；可选择仅本次试验操作，仍需确认客户端显示。')
+            box.setText('加密副本写入、读回和其他好友记录校验通过；原始头像库和日志均未改动。\n报告不含好友 ID、昵称、头像、数据路径或密钥。默认不写原库；可选择仅本次试验操作，仍需确认客户端显示。')
             box.setDetailedText(text)
             copy=box.addButton('复制检查结果',QMessageBox.ButtonRole.ActionRole)
             trial=box.addButton('仅本次试验恢复' if _restore else '仅本次试验应用',QMessageBox.ButtonRole.AcceptRole)
@@ -332,7 +335,7 @@ class Window(QMainWindow):
 
     def operation_error(self,exc):
         # SQLCipher exceptions can contain internal paths. Never expose raw exceptions.
-        message=str(exc) if isinstance(exc,(OfflineError,CompatibilityError,CipherError)) else '操作失败。请保持微信关闭，保留工具备份，点击“故障恢复”。未确认成功的操作不会显示为有效。'
+        message=str(exc) if isinstance(exc,(OfflineError,CompatibilityError,CipherError,VersionError)) else '操作失败。请保持微信关闭，保留工具备份，点击“故障恢复”。未确认成功的操作不会显示为有效。'
         QMessageBox.warning(self,'操作未完成',message)
 
     def clear(self):

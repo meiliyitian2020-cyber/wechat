@@ -32,7 +32,7 @@ jobs:
           Get-Content executable-selftest.json
       - uses: actions/upload-artifact@v4
         with:
-          name: WeChatLocalProfileEditor-compatibility-4.1.15.56-65
+          name: WeChatLocalProfileEditor-WAL-fix-4.1.15.56-65
           path: |
             dist/WeChatLocalProfileEditor.exe
             executable-selftest.json

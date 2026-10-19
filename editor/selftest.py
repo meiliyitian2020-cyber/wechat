@@ -24,15 +24,33 @@ def run(output):
                 report['cipher_version']=db.execute('PRAGMA cipher_version').fetchone()[0]
                 db.execute('CREATE TABLE head_image(username TEXT PRIMARY KEY,image_buffer BLOB,md5 TEXT,update_time INTEGER)')
                 db.execute('INSERT INTO head_image VALUES(?,?,?,?)',('artificial-friend',b'original','',0));db.commit()
+            # Reproduce residual WAL/SHM after exit, including an uncheckpointed commit.
+            db=open_cipher(source,key)
+            try:
+                db.execute('PRAGMA journal_mode=WAL')
+                db.execute('PRAGMA wal_autocheckpoint=0')
+                db.execute('UPDATE head_image SET image_buffer=? WHERE username=?',(b'committed-in-wal','artificial-friend'))
+                db.commit()
+                snapshot={suffix:Path(str(source)+suffix).read_bytes() for suffix in ('','-wal','-shm')}
+            finally:
+                db.close()
+            for suffix,data in snapshot.items(): Path(str(source)+suffix).write_bytes(data)
             context=Context(source,root,root.name,Path(temp)/'nonexistent-test-executable',key)
             # These bypasses apply only to this function's freshly generated fixture.
             # The real Windows exclusive file handle is deliberately NOT bypassed.
             service=OfflineAvatar(Path(temp)/'backups',_guard=lambda:None,
                                   _validate=lambda c:None,_version=lambda c:None,_read_version=lambda c:None)
             original=source.read_bytes()
+            initial_probe=service.probe(context,'artificial-friend',b'custom')
+            if initial_probe['committed_wal_frames']<1: raise RuntimeError('WAL recovery not exercised')
+            for suffix,data in snapshot.items():
+                if Path(str(source)+suffix).read_bytes()!=data: raise RuntimeError('probe modified source set')
+            report['stages'].append('residual_wal_and_shm_copy_recovery')
             bundle=Path(service.apply(context,'artificial-friend',b'custom'))
             report['stages'].append('exclusive_writeback')
             if (bundle/'original.enc').read_bytes()!=original: raise RuntimeError('backup mismatch')
+            if (bundle/'wal.enc').read_bytes()!=snapshot['-wal']: raise RuntimeError('WAL backup mismatch')
+            if (bundle/'shm.bin').read_bytes()!=snapshot['-shm']: raise RuntimeError('SHM backup mismatch')
             seen=read_current(context,['artificial-friend'],_validate=lambda c:None)
             if seen['artificial-friend']!=b'custom': raise RuntimeError('readback mismatch')
             report['stages'].append('encrypted_observation')

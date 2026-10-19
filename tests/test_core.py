@@ -85,3 +85,14 @@ def test_reader_excludes_chat_databases(tmp_path,monkeypatch):
     assert len(r._collect_db_files())==2
     assert r._stable_key_dirs()==[]
     assert not r._try_other_accounts()
+
+def test_saving_same_intent_does_not_erase_success_history(store):
+    store.save('a','f','original',b'old',None,b'custom')
+    store.record_applied('a','f','backup')
+    before=store.rows()[0]
+    store.save('a','f','changed-source-name',b'changed-source-avatar',None,b'custom')
+    after=store.rows()[0]
+    assert after['last_applied']==before['last_applied']
+    assert after['original_avatar']==b'old' and after['original_name']=='original'
+    store.save('a','f','ignored',b'ignored',None,b'different')
+    assert store.rows()[0]['last_applied'] is None

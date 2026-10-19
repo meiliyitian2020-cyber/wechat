@@ -339,3 +339,149 @@ def test_candidate_gui_explicit_trial_button_reaches_guarded_write(fixture,tmp_p
     assert store.rows()[0]['last_applied']
     assert store.rows()[0]['state']==State.UNKNOWN.value
     assert window.close();app.processEvents()
+
+def residual_wal(context):
+    """Create an offline snapshot with committed data only in WAL, no live handle."""
+    db=open_cipher(context.source,context.key)
+    try:
+        db.execute('PRAGMA journal_mode=WAL')
+        db.execute('PRAGMA wal_autocheckpoint=0')
+        db.execute('UPDATE head_image SET image_buffer=? WHERE username=?',(b'wal-latest-target','friend'))
+        db.execute('UPDATE head_image SET image_buffer=? WHERE username=?',(b'wal-latest-other','untouched'))
+        db.commit()
+        data={suffix:Path(str(context.source)+suffix).read_bytes() for suffix in ('','-wal','-shm')}
+    finally: db.close()
+    # Recreate a PERSIST_WAL-like offline file set after the SQLite connection ends.
+    for suffix,value in data.items(): Path(str(context.source)+suffix).write_bytes(value)
+    return data
+
+def current_set(context):
+    return {suffix:Path(str(context.source)+suffix).read_bytes() if Path(str(context.source)+suffix).exists() else None
+            for suffix in ('','-wal','-shm')}
+
+def test_residual_wal_probe_preserves_all_original_files_and_latest_rows(fixture):
+    context,service=fixture;original=residual_wal(context)
+    report=service.probe(context,'friend',b'custom')
+    assert report['wal_present'] and report['shm_present']
+    assert report['committed_wal_frames']>0 and report['source_unchanged']
+    assert current_set(context)==original
+
+
+def test_wal_writeback_keeps_other_contacts_latest_commit_and_full_backup(fixture):
+    context,service=fixture;original=residual_wal(context)
+    bundle=Path(service.apply(context,'friend',b'custom'))
+    assert Path(str(context.source)+'-wal').read_bytes()==b''
+    assert Path(str(context.source)+'-shm').read_bytes()==b''
+    assert (bundle/'original.enc').read_bytes()==original['']
+    assert (bundle/'wal.enc').read_bytes()==original['-wal']
+    assert (bundle/'shm.bin').read_bytes()==original['-shm']
+    assert avatar(context)==b'custom'
+    assert avatar(context,'untouched')==b'wal-latest-other'
+
+@pytest.mark.parametrize('phase',['after_main','after_wal','after_shm'])
+def test_mid_file_set_failure_restores_main_wal_and_shm_exactly(fixture,phase):
+    context,service=fixture;original=residual_wal(context)
+    def fail(at):
+        if at==phase: raise RuntimeError('injected multi-file fault')
+    with pytest.raises(OfflineError,match='已恢复'):
+        service.apply(context,'friend',b'custom',_fault=fail)
+    assert current_set(context)==original
+    record=json.loads(next(service.backup_root.glob('*/operation.json')).read_text())
+    assert record['state']=='rolled_back'
+    # Recovery must preserve the previously committed data that lived in WAL.
+    assert avatar(context)==b'wal-latest-target'
+    assert avatar(context,'untouched')==b'wal-latest-other'
+
+@pytest.mark.parametrize('empty_wal',[True,False])
+def test_empty_wal_or_shm_only_is_handled_without_manual_deletion(fixture,empty_wal):
+    context,service=fixture
+    if empty_wal: Path(str(context.source)+'-wal').write_bytes(b'')
+    Path(str(context.source)+'-shm').write_bytes(b'old-index'*4096)
+    original=current_set(context)
+    report=service.probe(context,'friend',b'custom')
+    assert report['committed_wal_frames']==0
+    assert current_set(context)==original
+    service.apply(context,'friend',b'custom')
+    assert Path(str(context.source)+'-shm').read_bytes()==b''
+    assert avatar(context)==b'custom'
+
+@pytest.mark.parametrize('kind',['header','checksum','hmac','truncated'])
+def test_invalid_wal_is_rejected_without_changing_any_original_file(fixture,kind):
+    import struct
+    from editor.wal import checksum,FRAME
+    context,service=fixture;residual_wal(context)
+    path=Path(str(context.source)+'-wal');data=bytearray(path.read_bytes())
+    if kind=='header': data[12]^=1
+    elif kind=='truncated': data=data[:-100]
+    else:
+        data[32+24+100]^=1
+        if kind=='hmac':
+            magic=struct.unpack('>I',data[:4])[0];endian='>' if magic&1 else '<'
+            rolling=struct.unpack('>II',data[24:32])
+            for offset in range(32,len(data),FRAME):
+                rolling=checksum(bytes(data[offset:offset+8])+bytes(data[offset+24:offset+FRAME]),rolling,endian)
+                data[offset+16:offset+24]=struct.pack('>II',*rolling)
+    path.write_bytes(data);original=current_set(context)
+    with pytest.raises(OfflineError,match='WAL'):
+        service.probe(context,'friend',b'custom')
+    assert current_set(context)==original
+
+@pytest.mark.parametrize('suffix',['-wal','-shm'])
+def test_candidate_proof_binds_sidecars_as_well_as_main(candidate,suffix):
+    context,service=candidate;residual_wal(context)
+    service.probe(context,'friend',b'custom')
+    path=Path(str(context.source)+suffix)
+    data=bytearray(path.read_bytes());data[-1]^=1;path.write_bytes(data)
+    before=current_set(context)
+    with pytest.raises(OfflineError,match='日志.*变化'):
+        service.apply(context,'friend',b'custom',_candidate_trial=True)
+    assert current_set(context)==before
+
+
+def test_recover_recognized_interruption_between_main_and_wal(fixture):
+    context,service=fixture;original=residual_wal(context)
+    bundle=Path(service.apply(context,'friend',b'custom'))
+    # Simulate crash after new main was flushed but before WAL/SHM were reset.
+    for suffix in ('-wal','-shm'): Path(str(context.source)+suffix).write_bytes(original[suffix])
+    jp=bundle/'operation.json';record=json.loads(jp.read_text());record['state']='writing';jp.write_text(json.dumps(record))
+    assert service.recover('account',context=context)==1
+    assert current_set(context)==original
+
+@pytest.mark.skipif(os.name!='nt',reason='Windows three-file exclusive handles integration')
+def test_windows_exclusive_main_and_sidecar_writeback(fixture):
+    context,service=fixture;residual_wal(context);service.lock=WindowsFile
+    service.probe(context,'friend',b'windows-wal')
+    service.apply(context,'friend',b'windows-wal')
+    assert avatar(context)==b'windows-wal'
+    assert avatar(context,'untouched')==b'wal-latest-other'
+
+def test_valid_old_epoch_tail_is_not_replayed(fixture):
+    import struct
+    context,service=fixture;original=residual_wal(context)
+    wal=bytearray(original['-wal']);frame=bytearray(wal[32:32+4120])
+    frame[8:16]=bytes(value^0xff for value in wal[16:24])
+    wal.extend(frame);Path(str(context.source)+'-wal').write_bytes(wal)
+    before=current_set(context)
+    report=service.probe(context,'friend',b'custom')
+    assert report['stale_wal_tail']
+    assert current_set(context)==before
+    service.apply(context,'friend',b'custom')
+    assert avatar(context,'untouched')==b'wal-latest-other'
+
+
+def test_uncommitted_valid_frames_are_not_mistaken_for_commits(fixture):
+    import struct
+    from editor.wal import checksum,FRAME
+    context,service=fixture;original=residual_wal(context)
+    wal=bytearray(original['-wal']);magic=struct.unpack('>I',wal[:4])[0];endian='>' if magic&1 else '<'
+    rolling=struct.unpack('>II',wal[24:32])
+    for offset in range(32,len(wal),FRAME):
+        wal[offset+4:offset+8]=b'\0'*4
+        rolling=checksum(bytes(wal[offset:offset+8])+bytes(wal[offset+24:offset+FRAME]),rolling,endian)
+        wal[offset+16:offset+24]=struct.pack('>II',*rolling)
+    Path(str(context.source)+'-wal').write_bytes(wal)
+    report=service.probe(context,'friend',b'custom')
+    assert report['committed_wal_frames']==0 and report['uncommitted_wal_frames']>0
+    service.apply(context,'friend',b'custom')
+    # The other avatar update was never committed in this synthetic WAL.
+    assert avatar(context,'untouched')==b'other'
