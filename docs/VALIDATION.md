@@ -172,3 +172,8 @@ https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39220564386/artifac
 新增“登录后头像诊断（只读）”：使用稳定主库/WAL副本，区分自定义字节仍存在、
 原始字节恢复、其他字节、记录缺失、无法读取。报告不包含身份、图片、路径、密钥。
 该检查只能定位数据库层是否变化，不能确定缓存读取优先级或同步原因，不是替换修复。
+
+诊断版 a966db9：Linux 97 passed、2 skipped；Windows Actions run 39223175102 SUCCESS，
+1m34s，包含测试、单文件打包和人工数据库 EXE 自检。artifact 12172074318。
+下载：https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39223175102/artifacts/12172074318
+尚未收到诊断版在真实账号上的登录后报告；头像显示替换仍未修复。
