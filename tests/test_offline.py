@@ -248,11 +248,11 @@ def test_candidate_gui_can_probe_but_refuses_original_writes(fixture,tmp_path,mo
     assert not service.backup_root.exists()
     assert window.close();app.processEvents()
 
-@pytest.fixture
-def candidate(fixture,tmp_path,monkeypatch):
+@pytest.fixture(params=['4.1.15.56','4.1.15.65'])
+def candidate(fixture,tmp_path,monkeypatch,request):
     import editor.offline as offline
-    context,_=fixture;context.detected_version='4.1.15.65'
-    monkeypatch.setattr(offline,'version',lambda path:'4.1.15.65')
+    context,_=fixture;context.detected_version=request.param
+    monkeypatch.setattr(offline,'version',lambda path:request.param)
     service=OfflineAvatar(tmp_path/'trial-backups',_lock=FileLock,_guard=lambda:None)
     return context,service
 
@@ -269,7 +269,7 @@ def test_candidate_trial_writes_only_probed_data_once(candidate):
     assert avatar(context)==b'new' and avatar(context,'untouched')==b'other'
     assert (bundle/'original.enc').read_bytes()==original
     record=json.loads((bundle/'operation.json').read_text())
-    assert record['candidate_trial'] and record['wechat_version']=='4.1.15.65'
+    assert record['candidate_trial'] and record['wechat_version']==context.detected_version
     assert record['state']=='committed'
     with pytest.raises(OfflineError,match='副本检查'):
         service.apply(context,'friend',b'new',_candidate_trial=True)

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QListWidgetItem, QFileDialog, QMessageBox)
 from .core import Store, normalize_image, Writer, UnsupportedWrite, State
 from .reader import Session, auto_detect_db_dir, list_accounts
-from .windows import discover, WRITE_VERSIONS
+from .windows import discover, WRITE_VERSIONS, READ_VERSIONS, VersionError
 from .offline import OfflineAvatar, OfflineError
 from .compatibility import CompatibilityError
 from .cipher_stage import CipherError
@@ -37,7 +37,11 @@ class Loader(QThread):
             self.ready.emit((self.account, contacts, avatars, session.write_context(executable, detected_version)))
         except Exception as exc:
             # Only expose stage and exception class, never raw keys or paths.
-            self.failed.emit(f'读取阶段：{stage}；错误类型：{type(exc).__name__}。'+'读取失败：请确认微信版本为 4.1.13.65 或 4.1.15.65、已登录、账号目录正确且进程权限一致。新版仅开放读取和副本检查。')
+            if isinstance(exc,VersionError):
+                self.failed.emit(f'读取阶段：{stage}。{exc}')
+            else:
+                versions='、'.join(sorted(READ_VERSIONS))
+                self.failed.emit(f'读取阶段：{stage}；错误类型：{type(exc).__name__}。请确认微信版本为 {versions}、已登录、账号目录正确且进程权限一致。新版先做副本检查。')
         finally:
             if session:
                 session.close()
@@ -56,7 +60,7 @@ class Window(QMainWindow):
         box = QWidget(); self.setCentralWidget(box)
         layout = QVBoxLayout(box)
         self.info = QLabel('正在识别微信环境……'); layout.addWidget(self.info)
-        layout.addWidget(QLabel('4.1.13.65：实验性写回；4.1.15.65：先检查副本，通过后可仅本次试验写入。客户端显示待实测，昵称未适配。'))
+        layout.addWidget(QLabel('4.1.13.65：实验性写回；4.1.15.56 / 4.1.15.65：先检查副本，通过后可仅本次试验写入。客户端显示待实测，昵称未适配。'))
         top = QHBoxLayout(); layout.addLayout(top)
         self.directory = QLineEdit(); self.directory.setPlaceholderText('微信数据根目录（其下包含各账号目录）')
         top.addWidget(self.directory)

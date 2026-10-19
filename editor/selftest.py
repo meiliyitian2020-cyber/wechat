@@ -36,7 +36,7 @@ def run(output):
             seen=read_current(context,['artificial-friend'],_validate=lambda c:None)
             if seen['artificial-friend']!=b'custom': raise RuntimeError('readback mismatch')
             report['stages'].append('encrypted_observation')
-            context.detected_version='4.1.15.65'
+            context.detected_version='4.1.15.56'
             snapshot=source.read_bytes()
             probe=service.probe(context,'artificial-friend',b'probe-only-avatar')
             if not probe['roundtrip_ok'] or source.read_bytes()!=snapshot:

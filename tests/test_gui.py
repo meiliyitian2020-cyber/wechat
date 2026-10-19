@@ -23,3 +23,15 @@ def test_chinese_ui_persistence_and_no_success_claim(tmp_path, monkeypatch):
     assert store.rows()[0]['state']=='无法验证'
     assert w.close()
     app.processEvents()
+
+def test_loader_explains_version_error_without_generic_permission_advice(monkeypatch):
+    from editor.gui import Loader
+    from editor.windows import VersionError
+    def unsupported(): raise VersionError('版本 4.1.15.57 尚未适配，禁止读取和修改')
+    monkeypatch.setattr('editor.gui.discover',unsupported)
+    messages=[];loader=Loader('unused','unused')
+    loader.failed.connect(messages.append);loader.run()
+    assert len(messages)==1
+    assert '4.1.15.57' in messages[0]
+    assert '版本识别' in messages[0]
+    assert '权限一致' not in messages[0]
