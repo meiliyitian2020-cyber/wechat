@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtGui import QPixmap, QIcon
@@ -11,6 +12,7 @@ from .windows import discover, WRITE_VERSIONS, READ_VERSIONS, VersionError
 from .offline import OfflineAvatar, OfflineError
 from .compatibility import CompatibilityError
 from .cipher_stage import CipherError
+from .diagnostics import login_report
 from .observe import read_current
 
 class Loader(QThread):
@@ -81,6 +83,7 @@ class Window(QMainWindow):
         self.button(right, '保存配置（不会修改微信）', self.save)
         self.button(right, '应用至微信', self.apply)
         self.button(right, '新版兼容性检查（不写原库）', self.probe)
+        self.button(right, '登录后头像诊断（只读）', self.diagnose_login)
         right.addStretch()
         bottom = QHBoxLayout(); layout.addLayout(bottom)
         self.button(bottom, '重新检查配置', self.check)
@@ -192,6 +195,34 @@ class Window(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self,'无法保存',str(exc))
 
+    def diagnose_login(self):
+        c = self.selected()
+        if not c: return
+        row = next((r for r in self.store.rows() if r['account'] == self.account
+                    and r['friend'] == c['username']), None)
+        if not row:
+            QMessageBox.information(self, '尚无配置', '请选中之前已保存替换配置的好友。')
+            return
+        try:
+            context = self.context()
+            try:
+                current = read_current(context, [c['username']])[c['username']]
+            except Exception:
+                current = None
+            report = login_report(row, current, context.detected_version)
+            text = json.dumps(report, ensure_ascii=False, indent=2)
+            box = QMessageBox(self)
+            box.setWindowTitle('登录后头像诊断 · 未修改微信')
+            box.setText(report['scope'])
+            box.setDetailedText(text)
+            copy = box.addButton('复制脱敏报告', QMessageBox.ButtonRole.ActionRole)
+            box.addButton('关闭', QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() == copy:
+                QApplication.clipboard().setText(text)
+        except Exception as exc:
+            self.operation_error(exc)
+
     def check(self):
         observations={}
         for account,context in self.contexts.items():
@@ -251,7 +282,7 @@ class Window(QMainWindow):
             self.store.record_applied(self.account,c['username'],backup)
             self.render()
             self.status.setText('加密头像库已写入并校验，备份已保存。现在可启动微信检查会话列表、聊天窗口和资料页；客户端生效尚待确认。')
-            QMessageBox.information(self,'数据库写入完成','头像库已写入并校验。请重新打开微信检查实际头像。尚不能将数据库成功等同于客户端显示成功。')
+            QMessageBox.information(self,'数据库写入完成','仅完成头像数据库写入，实际替换尚未成功验收。请登录微信检查头像；如未变化，保持工具打开，选中该好友点击“登录后头像诊断（只读）”。不要反复写入。')
         except Exception as exc:
             self.operation_error(exc)
 
