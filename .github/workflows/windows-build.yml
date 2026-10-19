@@ -23,7 +23,9 @@ jobs:
       - name: Test the frozen EXE against an artificial encrypted database
         shell: pwsh
         run: |
-          $process = Start-Process -FilePath '.\dist\WeChatLocalProfileEditor.exe' -ArgumentList '--self-test', 'executable-selftest.json' -WorkingDirectory $pwd.Path -Wait -PassThru
+          $process = Start-Process -FilePath '.\dist\WeChatLocalProfileEditor.exe' -ArgumentList '--self-test', 'executable-selftest.json' -WorkingDirectory $pwd.Path -PassThru
+          if (-not $process.WaitForExit(90000)) { $process.Kill(); throw 'Frozen executable self-test timed out' }
+          $process.Refresh()
           if ($process.ExitCode -ne 0) { throw 'Frozen executable self-test failed' }
           $report = Get-Content executable-selftest.json -Raw | ConvertFrom-Json
           if (-not $report.ok) { throw 'Frozen executable reported failure' }

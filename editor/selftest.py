@@ -52,6 +52,20 @@ def run(output):
                 if db.execute('SELECT count(*) FROM head_image').fetchone()[0]!=0:
                     raise RuntimeError('invalidation mismatch')
             report['stages'].append('invalidation')
+            # Exercise the bundled Qt platform plugins without discovering real accounts.
+            os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
+            from PySide6.QtWidgets import QApplication
+            from .core import Store
+            from . import gui
+            def synthetic_discover(): raise RuntimeError('人工数据打包自检')
+            gui.discover=synthetic_discover
+            app=QApplication.instance() or QApplication([])
+            window=gui.Window(Store(Path(temp)/'gui-state'))
+            window.show();app.processEvents()
+            if window.name.isEnabled(): raise RuntimeError('unsupported nickname editor enabled')
+            if not window.close(): raise RuntimeError('window did not close')
+            app.processEvents()
+            report['stages'].append('packaged_qt_gui_startup_and_shutdown')
         report['ok']=True;code=0
     except Exception as exc:
         report['error_type']=type(exc).__name__
