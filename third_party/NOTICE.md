@@ -24,3 +24,8 @@ cryptography（Apache-2.0 或 BSD-3-Clause，底层库另有许可）、psutil�
 可选 Linux 研究依赖：sqlcipher3-binary 0.6.0（Python 驱动为 zlib/libpng 类宽松许可，
 所捆绑 SQLCipher community 为 BSD 风格许可，OpenSSL 等另有许可）。
 当前 Windows 构建不安装、不分发该依赖；引入 Windows SQLCipher 二进制前需核查具体产物及许可。
+
+最新依赖变更：已替换 sqlcipher3-binary 为官方 coleifer/sqlcipher3 0.6.4，
+来源 https://github.com/coleifer/sqlcipher3 ，驱动许可证为 zlib/libpng，原文见 sqlcipher3-LICENSE。
+Windows wheel 已取得并检查，尚未执行；最新 Windows requirements 包含此依赖。
+驱动许可证不涵盖全部静态链接组件，发布 EXE 前仍需检查 SQLCipher/OpenSSL 的通知义务。

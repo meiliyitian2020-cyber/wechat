@@ -3,8 +3,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 import pytest
-# The optional engine only runs in the Linux research environment.
-sql = pytest.importorskip('sqlcipher3.dbapi2')
+from sqlcipher3 import dbapi2 as sql
 from editor.cipher_stage import AvatarStage, CipherError, verify_pages, open_cipher
 from editor.vendor.reader import _verify_enc_key, _decrypt_page
 

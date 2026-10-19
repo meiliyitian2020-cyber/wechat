@@ -59,3 +59,10 @@
 
 新增 `editor/backup.py` 支持离线稳定副本及 WAL/SHM 存在状态、哈希和损坏检查。
 复制前后进程和哈希检查不能替代独占锁；目前不宣称能在与微信竞争时获得一致性写回。
+
+### 官方 Windows wheel 可用
+
+检查官方 https://pypi.org/project/sqlcipher3/ 的当前说明，0.6.2 起提供自包含 wheel。
+本项目固定 0.6.4，已取得 CPython 3.12 win_amd64 wheel，而非使用来源不明的 DLL。
+因此此前“Windows 引擎依赖未解决”已推进为“发行包可取得，原生加载和实机兼容尚待验证”。
+不需要另行手写 AES/SQLCipher 写库，也未启用真实账号写入。

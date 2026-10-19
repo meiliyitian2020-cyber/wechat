@@ -45,3 +45,16 @@ SQLCipher 实验涵盖加密暂存写入/解密读回、事务异常回滚、WAL
 Windows 构建不安装此 Linux 研究依赖，因此该组实验在 Windows 测试中会显示为 skipped，
 不能将 Windows 其余测试通过解释为 SQLCipher Windows 写回能力已验证。
 此前列出的 Windows 和真实客户端未验证事项仍然全部有效。
+
+## Windows 用户反馈与跨平台依赖更新
+
+用户反馈：本地可以识别微信环境、读取联系人、当前昵称与头像。
+这是用户执行后的反馈，不是本会话直接操作 Windows 所得的结果。
+该反馈未包含 OS build、确切客户端版本、截图或日志，因此不据此扩大为特定版本的完整适配结论。
+真实修改、客户端显示、远端设备影响和 EXE 验收仍未通过。
+
+已通过 PyPI 核对官方 coleifer/sqlcipher3 0.6.4 提供 Windows CPython 3.12 x64 wheel，
+并下载核对其中的原生 .pyd 和驱动许可证。这只证明构建依赖可取得，不证明 Windows 加载成功。
+统一使用 sqlcipher3==0.6.4；在本环境实际运行 26 passed，0 failed，0 skipped。
+之前关于 Windows 不安装 SQLCipher、对应测试会跳过的说明不再适用于最新配置：
+最新 requirements 包含引擎，加密测试不再使用 importorskip，缺少引擎会让测试失败。

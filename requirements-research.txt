@@ -1,4 +1,2 @@
 -r requirements.txt
 pytest==8.4.2
-# Linux SQLCipher experiment only. Not a Windows runtime dependency.
-sqlcipher3-binary==0.6.0; sys_platform == 'linux'

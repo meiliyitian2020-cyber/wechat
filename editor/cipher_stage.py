@@ -2,8 +2,8 @@
 
 Only the standard 4096-byte SQLCipher4 raw-key format is supported here.
 WCDB compatibility and actual client rendering remain unverified.
-The SQLCipher engine is an optional Linux research dependency, not bundled
-in the Windows application. Writer does not call this module.
+The pinned SQLCipher engine provides Linux and Windows x64 wheels.
+Windows execution remains unverified. Writer does not call this module.
 """
 from contextlib import closing
 from pathlib import Path
