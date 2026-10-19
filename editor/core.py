@@ -1,4 +1,4 @@
-"""Local-only desired configuration. No WeChat mutation backend is registered."""
+"""Local profile configuration and scoped status. Experimental writer is in offline.py."""
 from __future__ import annotations
 from contextlib import closing
 from datetime import datetime, timezone
@@ -69,6 +69,20 @@ class Store:
     def rows(self):
         with closing(self.connect()) as db:
             return [dict(r) for r in db.execute('SELECT * FROM profiles ORDER BY account,friend')]
+
+    def record_applied(self, account, friend, backup):
+        with closing(self.connect()) as db, db:
+            db.execute('CREATE TABLE IF NOT EXISTS operations (account TEXT, friend TEXT, backup TEXT, time TEXT, action TEXT)')
+            db.execute('INSERT INTO operations VALUES (?,?,?,?,?)',(account,friend,backup,now(),'apply'))
+            db.execute('UPDATE profiles SET last_applied=?,last_verified=?,state=?,scope=? WHERE account=? AND friend=?',
+                       (now(),now(),State.UNKNOWN.value,'加密头像库写入并校验通过；客户端显示尚未验证',account,friend))
+
+    def record_invalidated(self, account, friend, backup):
+        with closing(self.connect()) as db, db:
+            db.execute('CREATE TABLE IF NOT EXISTS operations (account TEXT, friend TEXT, backup TEXT, time TEXT, action TEXT)')
+            db.execute('INSERT INTO operations VALUES (?,?,?,?,?)',(account,friend,backup,now(),'invalidate'))
+            db.execute('UPDATE profiles SET last_applied=NULL,last_verified=?,state=?,scope=? WHERE account=? AND friend=?',
+                       (now(),State.UNKNOWN.value,'本地头像记录已清除，等待微信重新获取当前头像；替换配置保留',account,friend))
 
     def clear_config(self, account, friend):
         # This deliberately does not claim to restore any WeChat resource.

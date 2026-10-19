@@ -1,5 +1,7 @@
-name: Windows read-only validation build
+name: Windows experimental avatar editor build
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 jobs:
   build:
@@ -16,8 +18,8 @@ jobs:
       - run: python -m pytest -q
         env:
           QT_QPA_PLATFORM: offscreen
-      - run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name WeChatLocalProfileEditor --add-data "third_party;third_party" main.py
+      - run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name WeChatLocalProfileEditor --collect-all sqlcipher3 --copy-metadata sqlcipher3 --add-data "third_party;third_party" main.py
       - uses: actions/upload-artifact@v4
         with:
-          name: WeChatLocalProfileEditor-read-only-unverified
+          name: WeChatLocalProfileEditor-experimental-unverified
           path: dist/WeChatLocalProfileEditor.exe
