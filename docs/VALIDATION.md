@@ -93,3 +93,13 @@ GitHub Actions run 39211328364，提交 10dcd3e，状态 SUCCESS，耗时 1m39s�
 并上传 EXE artifact。这证明首次 Windows 原生构建通过，不等于真实微信客户端显示已通过。
 后续提交新增 EXE 内置 --self-test：构建后实际启动 EXE，对人工加密库执行独占写入、读回和头像记录清除。
 该新增自检需以对应新构建结果为准，不能从第一次构建成功推断。
+
+### 最终本轮 Windows 测试包结果
+
+提交 bf07176，GitHub Actions run 39211673240：SUCCESS，1m25s。
+流程依次通过 Windows 人工数据测试、PyInstaller 单文件打包、启动实际 EXE --self-test 并检查 ok=true，
+然后才上传 artifact 12168305639（页面显示约 59 MB）。
+该自检在 Windows 临时目录创建人工加密库，实际使用 Windows 独占句柄完成写入、备份核验、
+观察读回和头像记录清除；不访问用户微信数据。不能替代真实微信的三处头像显示和收发消息验收。
+下载： https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39211673240/artifacts/12168305639
+GitHub artifact 下载需要登录，解压后运行 dist/WeChatLocalProfileEditor.exe。
