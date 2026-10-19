@@ -250,3 +250,12 @@ https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39232533733/artifac
 已用人工加密数据库验证 A→B→A、额外字段/其他表不变、残留 WAL/SHM、逐文件失败回滚、
 触发器拒绝、参数绑定、配置跨重启保存、报告脱敏、GUI A/B 流程及头像配置不受影响。
 手机端/服务器备注不变不能通过本地数据库测试证明，仍需真实客户端验收；本功能尚不标记“修改有效”。
+
+本机备注试验实现 c4975f6，随包说明修订 88ea74f：Linux 121 passed、2 skipped。
+Windows 初次代码构建 39236656938 SUCCESS（1m44s）；最终说明同步构建 39236961281
+SUCCESS（1m46s），包含 Windows 测试、单文件打包和实际 EXE 自检。
+新增 EXE 自检使用新建人工联系人库执行 A→B→A，确认原昵称 CCCCC、标志、其他表不变；
+人工 Qt 1020×640 界面检查确认 B 输入与试验按钮可见，右侧可滚动，不访问真实微信。
+最终 artifact 12178588848（WeChatLocalProfileEditor-Desktop-Remark-Trial）：
+https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39236961281/artifacts/12178588848
+尚未验证真实微信显示 B、手机/服务器仍为 A；不将人工数据结果冒充纯本地验收。
