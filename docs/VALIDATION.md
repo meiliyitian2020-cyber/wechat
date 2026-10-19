@@ -141,3 +141,9 @@ https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39215740904/artifac
 两种 4.1.15 版本均运行单次写入凭据测试；EXE 自检使用 4.1.15.56 人工上下文。
 版本错误现在直接显示检测到的版本和具体策略原因，不再统一提示账号/进程权限问题。
 Linux：73 passed、1 skipped（Windows 独占句柄）。4.1.15.56 真实数据读取和客户端头像显示仍待用户验证。
+
+4.1.15.56 修正版提交 050c492：Windows Actions run 39217721788 SUCCESS（1m36s）。
+Windows 自动化测试、EXE 的加密事务/新版单次凭据流程与打包界面启动退出自检通过。
+artifact 12170555922，约 59 MB：
+https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39217721788/artifacts/12170555922
+真实 4.1.15.56 客户端读取及显示仍需用户实测。
