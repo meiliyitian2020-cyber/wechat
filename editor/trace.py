@@ -6,6 +6,7 @@ import psutil
 from PySide6.QtCore import QThread, Signal
 from .diagnostics import login_report
 from .observe import read_details
+from .offline import WRITE_STRATEGY
 
 
 def wechat_running():
@@ -58,7 +59,7 @@ class Timeline:
                 custom_seen = True
             elif custom_seen and state != 'unverifiable':
                 replaced_after_custom = True
-        return {'report_version': 2, 'operation': 'guided_login_timeline',
+        return {'report_version': 3, 'write_strategy': WRITE_STRATEGY, 'operation': 'guided_login_timeline',
                 'wechat_version': self.version, 'stop_reason': reason,
                 'sampling_interval_seconds': 2, 'samples': self.samples, 'read_failures': self.failures,
                 'custom_bytes_observed': custom_seen,

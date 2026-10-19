@@ -489,13 +489,13 @@ def test_uncommitted_valid_frames_are_not_mistaken_for_commits(fixture):
 
 def test_readonly_diagnostic_metadata_reflects_actual_encrypted_record(fixture):
     from editor.observe import read_details
-    import hashlib
     context, service = fixture
     service.apply(context, 'friend', b'custom')
     before = context.source.read_bytes()
     observed = read_details(context, 'friend', _validate=lambda c:None)
     assert observed['image'] == b'custom'
-    assert observed['md5'] == hashlib.md5(b'custom').hexdigest()
+    assert observed['md5'] == ''
+    assert observed['update_time'] == 0
     assert isinstance(observed['update_time'], int)
     assert context.source.read_bytes() == before
 
@@ -515,5 +515,35 @@ def test_timeline_detects_replacement_in_real_encrypted_database_without_sampler
     assert context.source.read_bytes() == before
     report = timeline.report('test')
     assert report['replacement_after_custom_observed'] is True
-    assert report['events'][-1]['md5_matches_image_bytes'] is True
+    assert report['events'][-1]['md5_matches_image_bytes'] is False
+    assert report['events'][-1]['md5_changed_since_last_read'] is False
     assert report['events'][-1]['image_changed_since_last_read'] is True
+
+
+@pytest.mark.parametrize('stored_md5,stored_time', [
+    ('remote-avatar-version-token', 1700000000), (None, None), ('', -1),
+])
+def test_preserve_all_non_image_fields_including_unknown_columns(fixture, stored_md5, stored_time):
+    from editor.offline import WRITE_STRATEGY
+    context, service = fixture
+    context.detected_version = '4.1.15.56'
+    with closing(open_cipher(context.source, context.key)) as db:
+        db.execute('ALTER TABLE head_image ADD COLUMN future_sync_data BLOB')
+        db.execute('UPDATE head_image SET md5=?,update_time=?,future_sync_data=? WHERE username=?',
+                   (stored_md5, stored_time, b'opaque-metadata\x00', 'friend'))
+        db.commit()
+        original = db.execute('SELECT * FROM head_image WHERE username=?', ('friend',)).fetchone()
+        unrelated = db.execute('SELECT * FROM head_image WHERE username=?', ('untouched',)).fetchone()
+    before = context.source.read_bytes()
+    report = service.probe(context, 'friend', b'custom')
+    assert context.source.read_bytes() == before
+    assert report['write_strategy'] == WRITE_STRATEGY
+    assert report['target_non_image_fields_unchanged'] is True
+    backup = service.apply(context, 'friend', b'custom', _candidate_trial=True)
+    with closing(open_cipher(context.source, context.key)) as db:
+        after = db.execute('SELECT * FROM head_image WHERE username=?', ('friend',)).fetchone()
+        assert after[0] == original[0]
+        assert after[1] == b'custom'
+        assert after[2:] == original[2:]
+        assert db.execute('SELECT * FROM head_image WHERE username=?', ('untouched',)).fetchone() == unrelated
+    assert json.loads((Path(backup) / 'operation.json').read_text())['write_strategy'] == WRITE_STRATEGY

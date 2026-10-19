@@ -23,7 +23,7 @@ def run(output):
                 db.execute('PRAGMA key = "x\''+key.hex()+'\'"')
                 report['cipher_version']=db.execute('PRAGMA cipher_version').fetchone()[0]
                 db.execute('CREATE TABLE head_image(username TEXT PRIMARY KEY,image_buffer BLOB,md5 TEXT,update_time INTEGER)')
-                db.execute('INSERT INTO head_image VALUES(?,?,?,?)',('artificial-friend',b'original','',0));db.commit()
+                db.execute('INSERT INTO head_image VALUES(?,?,?,?)',('artificial-friend',b'original','synthetic-remote-avatar-token',1700000000));db.commit()
             # Reproduce residual WAL/SHM after exit, including an uncheckpointed commit.
             db=open_cipher(source,key)
             try:
@@ -53,7 +53,11 @@ def run(output):
             if (bundle/'shm.bin').read_bytes()!=snapshot['-shm']: raise RuntimeError('SHM backup mismatch')
             seen=read_current(context,['artificial-friend'],_validate=lambda c:None)
             if seen['artificial-friend']!=b'custom': raise RuntimeError('readback mismatch')
-            report['stages'].append('encrypted_observation')
+            with closing(open_cipher(source,key)) as check:
+                fields=check.execute('SELECT md5,update_time FROM head_image').fetchone()
+                if fields!=('synthetic-remote-avatar-token',1700000000):
+                    raise RuntimeError('avatar metadata not preserved')
+            report['stages'].append('encrypted_observation_and_preserved_non_image_fields')
             context.detected_version='4.1.15.56'
             snapshot=source.read_bytes()
             probe=service.probe(context,'artificial-friend',b'probe-only-avatar')

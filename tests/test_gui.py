@@ -76,5 +76,5 @@ def test_guided_diagnostic_reuses_saved_photo_and_copies_report(tmp_path, monkey
     assert report['source_written_by_sampler'] is False
     assert (tmp_path / 'login-diagnostic.json').exists()
     assert w.trace_worker is None
-    assert w.trace_button.text() == '开始一键诊断'
+    assert w.trace_button.text() == '开始一键诊断（保留字段）'
     assert w.close()

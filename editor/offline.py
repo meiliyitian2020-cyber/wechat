@@ -22,6 +22,8 @@ from .windows import ensure_wechat_stopped, version, TARGET, check_read_version,
 from .compatibility import inspect_head, other_rows_digest, CompatibilityError
 from .wal import validate_wal
 
+WRITE_STRATEGY = 'image_buffer_only_preserve_metadata'
+
 class OfflineError(RuntimeError):
     pass
 
@@ -210,16 +212,24 @@ class OfflineAvatar:
             db.execute('PRAGMA foreign_keys=ON')
             with db:
                 db.execute('BEGIN IMMEDIATE')
-                if db.execute('SELECT count(*) FROM head_image WHERE username=?',(friend,)).fetchone()[0]!=1:
+                cursor=db.execute('SELECT * FROM head_image WHERE username=?',(friend,))
+                rows=cursor.fetchall()
+                if len(rows)!=1:
                     raise OfflineError('目标好友头像记录缺失或不唯一')
+                expected=list(rows[0])
+                image_index=[c[0] for c in cursor.description].index('image_buffer')
+                expected[image_index]=avatar
                 if invalidate: db.execute('DELETE FROM head_image WHERE username=?',(friend,))
                 else:
-                    db.execute('UPDATE head_image SET image_buffer=?,md5=?,update_time=? WHERE username=?',
-                               (avatar,hashlib.md5(avatar).hexdigest(),int(time.time()),friend))
+                    # The live client uses md5 values not equal to MD5(image_buffer).
+                    # Preserve every other field; their synchronization meaning is unproven.
+                    db.execute('UPDATE head_image SET image_buffer=? WHERE username=?',(avatar,friend))
             checkpoint_copy(db)
         verify_pages(path,key)
         with closing(open_cipher(path,key)) as db:
             if not self._matches(db,friend,avatar,invalidate): raise OfflineError('副本目标记录验证失败')
+            if not invalidate and db.execute('SELECT * FROM head_image WHERE username=?',(friend,)).fetchall()!=[tuple(expected)]:
+                raise OfflineError('目标记录的非图片字段发生变化，禁止写回')
             if other_rows_digest(db,friend)!=before: raise OfflineError('副本修改影响了其他好友')
             if db.execute('PRAGMA foreign_key_check').fetchall(): raise OfflineError('副本关联完整性检查失败')
             if inspect_head(db)!=metadata: raise OfflineError('副本表结构发生变化')
@@ -228,7 +238,7 @@ class OfflineAvatar:
 
     def _check_proof(self,context,friend,avatar,invalidate):
         key=(id(context),friend,bool(invalidate));proof=self._probes.get(key)
-        if (not proof or proof['version']!=context.detected_version
+        if (not proof or proof.get('write_strategy')!=WRITE_STRATEGY or proof['version']!=context.detected_version
                 or proof['source_path']!=str(context.source.absolute()) or proof['account']!=context.account
                 or proof['avatar_hash']!=hash_bytes(avatar or b'') or time.monotonic()-proof['time']>300):
             raise OfflineError('需要先对当前好友和图片完成本次副本检查；检查凭据已缺失或过期')
@@ -277,7 +287,7 @@ class OfflineAvatar:
                                    'replacement_hash':hash_bytes(replacement[suffix]) if replacement[suffix] is not None else None,
                                    'backup':BACKUP_NAMES[suffix] if data is not None else None}
                 record={'schema':2,'account':context.account,'friend':friend,'action':'invalidate' if _invalidate else 'apply',
-                        'source':str(source_path),'wechat_version':context.detected_version,'candidate_trial':bool(trial),
+                        'source':str(source_path),'wechat_version':context.detected_version,'candidate_trial':bool(trial),'write_strategy':'delete_target_avatar_record' if _invalidate else WRITE_STRATEGY,
                         'state':'prepared','created':now(),'files':files,'original_hash':hash_bytes(original['']),
                         'replacement_hash':hash_bytes(replacement['']),'wal_present':original['-wal'] is not None,
                         'shm_present':original['-shm'] is not None}
@@ -319,8 +329,9 @@ class OfflineAvatar:
                 self._probes[(id(context),friend,bool(_invalidate))]={
                     'source_path':str(context.source.absolute()),'account':context.account,
                     'source_hash':fingerprint(original),'avatar_hash':hash_bytes(avatar or b''),
-                    'version':context.detected_version,'time':time.monotonic()}
-                return {'report_version':2,'wechat_version':context.detected_version,
+                    'version':context.detected_version,'time':time.monotonic(),'write_strategy':WRITE_STRATEGY}
+                return {'report_version':3,'write_strategy':'delete_target_avatar_record' if _invalidate else WRITE_STRATEGY,
+                        'target_non_image_fields_unchanged':None if _invalidate else True,'wechat_version':context.detected_version,
                         'operation':'invalidate' if _invalidate else 'apply','cipher_version':engine,
                         'page_size':4096,'reserve_bytes':80,'source_unchanged':True,'all_page_hmac_ok':True,
                         'roundtrip_ok':True,'non_target_rows_unchanged':True,'original_database_written':False,

@@ -59,7 +59,7 @@ class Window(QMainWindow):
         self.offline = OfflineAvatar(store.path.parent / 'backups')
         self.expired = []
         self.pending_avatar = None
-        self.setWindowTitle('微信本地身份工具 · 实验性离线头像替换 · 简易诊断版')
+        self.setWindowTitle('微信本地身份工具 · 实验性离线头像替换 · 保留字段试验版')
         self.resize(1020, 640)
         box = QWidget(); self.setCentralWidget(box)
         layout = QVBoxLayout(box)
@@ -86,7 +86,7 @@ class Window(QMainWindow):
         self.button(right, '应用至微信', self.apply)
         self.button(right, '新版兼容性检查（不写原库）', self.probe)
         self.button(right, '登录后头像诊断（只读）', self.diagnose_login)
-        self.trace_button = self.button(right, '开始一键诊断', self.guided_trace)
+        self.trace_button = self.button(right, '开始一键诊断（保留字段）', self.guided_trace)
         right.addStretch()
         bottom = QHBoxLayout(); layout.addLayout(bottom)
         self.button(bottom, '重新检查配置', self.check)
@@ -216,7 +216,7 @@ class Window(QMainWindow):
             context = self.context()
             if QMessageBox.question(self, '一键诊断',
                 '请保持本工具打开，完全退出微信（含托盘），然后点“确定”。\n'
-                '工具将自动备份、检查并试验写入这位好友的已保存头像一次，然后开始只读采集。\n'
+                '工具将自动备份、检查并试写已保存头像一次。本次仅替换图片，保留原有 md5 和时间等字段，再开始只读采集。\n'
                 '看到“正在诊断”后，登录微信并打开该好友聊天窗口，再点“结束诊断并复制报告”。\n'
                 '最多采集 3 分钟，不安装服务、不上传数据；本次仍用于定位，尚非修复。',
                 QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
@@ -245,7 +245,7 @@ class Window(QMainWindow):
     def trace_finished(self):
         worker = self.trace_worker
         self.trace_button.setEnabled(True)
-        self.trace_button.setText('开始一键诊断')
+        self.trace_button.setText('开始一键诊断（保留字段）')
         self.trace_worker = None
         if not worker or worker.result is None:
             self.status.setText('诊断未完成，未生成报告。')
