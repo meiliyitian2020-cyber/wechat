@@ -224,3 +224,14 @@ md5_matches_image_bytes=false。说明旧试写随后被覆盖；不能证明由
 测试包括真实加密库中字符串/NULL/空值元数据、未知 BLOB 列保留、单次试验写回、源副本不变、
 非目标行不变；打包 EXE 自检也校验预设模拟远端 token 与时间保留。
 该试验尚未在用户微信验证，不能认定“保留字段”会避免覆盖或控制会话/聊天/资料头像显示。
+
+保留字段试验版最终提交 06be25c（实现 8d0b406）：Linux 106 passed、2 skipped。
+Windows 首轮 39231897470 及带详细诊断的 39232228400 失败，后者定位为采样测试依赖
+30 毫秒真实时间窗口，Windows 调度可能使其在首次采样前已超时；未删除断言或跳过测试。
+改为注入可控时钟验证读取失败与期限退出，打包自检使用更合理的 0.5 秒实际采样窗口。
+保留原测试退出码，新增 JUnit 失败摘要注释以便后续定位。
+最终 Windows Actions run 39232533733 SUCCESS（1m49s）：Windows 测试、单文件 EXE 打包、
+实际 EXE 人工加密库写回、元数据保留、只读线程超时退出与 GUI 启动退出均通过。
+artifact 12177871888（WeChatLocalProfileEditor-Preserve-Metadata-Trial）：
+https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39232533733/artifacts/12177871888
+尚未验证本试验能避免真实微信登录覆盖，不能声称实际头像替换成功。
