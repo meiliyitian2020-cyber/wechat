@@ -177,3 +177,17 @@ https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39220564386/artifac
 1m34s，包含测试、单文件打包和人工数据库 EXE 自检。artifact 12172074318。
 下载：https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39223175102/artifacts/12172074318
 尚未收到诊断版在真实账号上的登录后报告；头像显示替换仍未修复。
+
+## 登录后数据库观测（真实账号，4.1.15.56）
+用户提供诊断报告：prior_database_write_recorded=true，observation=other_bytes_present，
+source_written=false，client_rendering_verified=false。
+可确认观测时头像库字节与自定义图片及保存的原始图片均不同；结合此前实际显示原头像的反馈，
+当前“改 image_buffer/md5/update_time”路线未达到验收要求。
+字节不同不等于画面不同，可能存在重新编码；不能把结果直接归因为服务器校验重下载。
+复查 WeChatMsg contact.py：联系人存在 head_img_md5、small_head_url、big_head_url；
+现有写入仅更新 head_image 的 md5（按新图片内容计算）、image_buffer、update_time，
+未调查联系人哈希与头像库 md5 的运行时关联。该关联是待验证假设，不是已定位根因。
+三个已研究上游均没有提供原版 4.1.15.56 的成功本地显示替换证据。
+下一步所需证据是实际客户端对头像资源的读取/重写时序，以及原始两个哈希字段的关系；
+不盲改 contact.db、不修改远端 URL、不禁用联网、不增加常驻拦截。
+本轮未发布新的 EXE，因为目前没有可声称修复显示的实现。
