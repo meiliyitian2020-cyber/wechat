@@ -201,3 +201,10 @@ source_written=false，client_rendering_verified=false。
 真实加密数据库测试覆盖更新后状态变化、只读采样不改源文件；Qt 流程测试覆盖复用图片、
 自动检查再写入、结束复制和保存报告；线程测试覆盖超时、主动停止、读取失败和脱敏。
 本功能不是 ProcMon 替代实现或修复；尚不能归因到具体进程、同步校验或文件缓存优先级。
+
+简易诊断版提交 6fad82a：Linux 103 passed、2 skipped；Windows Actions run 39226491002
+SUCCESS（1m36s）。完成 Windows 测试、单文件打包、人工数据库 EXE 自检，新增打包后只读采集
+线程实际运行、自动超时退出、源文件字节不变检查。
+artifact 12173837976（WeChatLocalProfileEditor-OneClick-Diagnostic）：
+https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39226491002/artifacts/12173837976
+真实微信采集和显示修复仍未验证。
