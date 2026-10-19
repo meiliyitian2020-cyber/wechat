@@ -3,6 +3,20 @@ from pathlib import Path
 import psutil
 
 TARGET = '4.1.13.65'
+# New updates are read/probe candidates only. A candidate is NOT write-enabled.
+READ_VERSIONS = frozenset({'4.1.13.65', '4.1.15.65'})
+WRITE_VERSIONS = frozenset({'4.1.13.65'})
+
+def check_read_version(detected, loaded=None):
+    if detected not in READ_VERSIONS:
+        raise RuntimeError(f'版本 {detected} 尚未适配，禁止读取和修改')
+    if loaded is not None and detected != loaded:
+        raise RuntimeError('微信在读取后发生版本变化，请重新读取账号；禁止沿用旧版本密钥上下文')
+
+def check_write_version(detected, loaded):
+    check_read_version(detected, loaded)
+    if detected not in WRITE_VERSIONS:
+        raise RuntimeError(f'{detected} 仅开放读取和副本兼容性检查，原始数据库写入尚未开放')
 
 def version(path):
     import ctypes
@@ -47,8 +61,7 @@ def discover():
     if len(results) != 1:
         raise RuntimeError('发现多个微信安装实例，暂不支持自动选择')
     path, ver = results[0]
-    if ver != TARGET:
-        raise RuntimeError(f'版本 {ver} 尚未适配；仅允许 {TARGET} 的实验性只读验证')
+    check_read_version(ver)
     return path, ver
 
 def ensure_wechat_stopped():

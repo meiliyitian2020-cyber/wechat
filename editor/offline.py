@@ -16,7 +16,8 @@ import tempfile
 import uuid
 from .cipher_stage import open_cipher, verify_pages, CipherError
 from .core import now
-from .windows import ensure_wechat_stopped, version, TARGET
+from .windows import ensure_wechat_stopped, version, TARGET, check_read_version, check_write_version
+from .compatibility import inspect_head, other_rows_digest, CompatibilityError
 
 class OfflineError(RuntimeError):
     pass
@@ -28,6 +29,7 @@ class Context:
     account: str
     executable: Path
     key: bytes = field(repr=False)
+    detected_version: str = TARGET
 
 class WindowsFile:
     """Deny all sharing, including deletion, until rollback/commit completes."""
@@ -100,25 +102,33 @@ def validate_context(context):
         current=current.parent
     if len(context.key)!=32:
         raise OfflineError('当前数据库密钥格式未适配写入')
-    if version(context.executable)!=TARGET:
-        raise OfflineError('微信版本已变化，已禁止写入')
+    validate_read_executable(context)
+
+def validate_read_executable(context):
+    try:
+        check_read_version(version(context.executable),context.detected_version)
+    except RuntimeError as exc:
+        raise OfflineError(str(exc)) from None
 
 def validate_executable(context):
-    if version(context.executable)!=TARGET:
-        raise OfflineError('微信版本已变化，已禁止写入')
+    try:
+        check_write_version(version(context.executable),context.detected_version)
+    except RuntimeError as exc:
+        raise OfflineError(str(exc)) from None
 
 def no_sidecars(source):
     if any(Path(str(source)+suffix).exists() for suffix in ('-wal','-shm')):
         raise OfflineError('头像库仍有 WAL/SHM。请正常退出微信后重试；不要手动删除这些文件。')
 
 class OfflineAvatar:
-    def __init__(self,backup_root,*,_lock=WindowsFile,_guard=ensure_wechat_stopped,_validate=validate_context,_version=validate_executable):
+    def __init__(self,backup_root,*,_lock=WindowsFile,_guard=ensure_wechat_stopped,_validate=validate_context,_version=validate_executable,_read_version=validate_read_executable):
         self.backup_root=Path(backup_root)
         self.lock,self.guard,self.validate,self.check_version=_lock,_guard,_validate,_version
+        self.check_read_version=_read_version
 
     def apply(self,context,friend,avatar,*,_fault=None,_invalidate=False):
         if not friend or (not avatar and not _invalidate): raise OfflineError('未选择好友或自定义头像')
-        self.validate(context);self.guard();no_sidecars(context.source)
+        self.validate(context);self.check_version(context);self.guard();no_sidecars(context.source)
         source_path=context.source.resolve(strict=True)
         root=self.backup_root.resolve()
         if root.is_relative_to(context.account_root.resolve()):
@@ -136,9 +146,9 @@ class OfflineAvatar:
                 stage=Path(temp)/'head_image.db';stage.write_bytes(original)
                 verify_pages(stage,context.key)
                 with closing(open_cipher(stage,context.key)) as db:
-                    columns={r[1] for r in db.execute('PRAGMA table_info(head_image)')}
-                    if not {'username','image_buffer','md5','update_time'}<=columns:
-                        raise OfflineError('头像表结构未适配')
+                    inspect_head(db)
+                    other_before=other_rows_digest(db,friend)
+                    db.execute('PRAGMA foreign_keys=ON')
                     with db:
                         db.execute('BEGIN IMMEDIATE')
                         rows=db.execute('SELECT image_buffer FROM head_image WHERE username=?',(friend,)).fetchall()
@@ -150,6 +160,8 @@ class OfflineAvatar:
                                        (avatar,hashlib.md5(avatar).hexdigest(),int(__import__('time').time()),friend))
                 verify_pages(stage,context.key)
                 with closing(open_cipher(stage,context.key)) as db:
+                    if other_rows_digest(db,friend)!=other_before:
+                        raise OfflineError('暂存修改影响了其他好友，已拒绝写回')
                     if not self._matches(db,friend,avatar,_invalidate):
                         raise OfflineError('目标头像校验失败')
                 replacement=stage.read_bytes()
@@ -183,6 +195,41 @@ class OfflineAvatar:
                         raise OfflineError('回滚未完成，请保持微信关闭，保留工具备份并执行故障恢复') from None
                     raise OfflineError('写入失败，已恢复操作前的加密头像库') from None
         return str(bundle)
+
+    def probe(self,context,friend,avatar):
+        """Offline dry-run on a private encrypted copy. Original is never written."""
+        if not friend or not avatar: raise OfflineError('请先选择测试好友和自定义头像')
+        self.validate(context);self.guard();no_sidecars(context.source)
+        with self.lock(context.source) as locked:
+            self.guard();no_sidecars(context.source)
+            original=locked.read()
+            with tempfile.TemporaryDirectory(prefix='avatar-compatibility-') as temp:
+                path=Path(temp)/'head_image.db';path.write_bytes(original)
+                verify_pages(path,context.key)
+                with closing(open_cipher(path,context.key)) as db:
+                    metadata=inspect_head(db)
+                    before=other_rows_digest(db,friend)
+                    db.execute('PRAGMA foreign_keys=ON')
+                    with db:
+                        db.execute('BEGIN IMMEDIATE')
+                        if db.execute('SELECT count(*) FROM head_image WHERE username=?',(friend,)).fetchone()[0]!=1:
+                            raise OfflineError('测试好友头像记录缺失或不唯一')
+                        db.execute('UPDATE head_image SET image_buffer=?,md5=?,update_time=? WHERE username=?',
+                                   (avatar,hashlib.md5(avatar).hexdigest(),int(__import__('time').time()),friend))
+                verify_pages(path,context.key)
+                with closing(open_cipher(path,context.key)) as db:
+                    if not self._matches(db,friend,avatar,False): raise OfflineError('副本目标记录验证失败')
+                    if other_rows_digest(db,friend)!=before: raise OfflineError('副本修改影响了其他好友')
+                    if db.execute('PRAGMA foreign_key_check').fetchall(): raise OfflineError('副本关联完整性检查失败')
+                    engine=db.execute('PRAGMA cipher_version').fetchone()[0]
+                    if inspect_head(db)!=metadata: raise OfflineError('副本表结构发生变化')
+                self.guard();self.check_read_version(context);no_sidecars(context.source)
+                if locked.read()!=original: raise OfflineError('源文件发生变化，检查结果无效')
+                return {'report_version':1,'wechat_version':context.detected_version,
+                        'cipher_version':engine,'page_size':4096,'reserve_bytes':80,
+                        'source_unchanged':True,'all_page_hmac_ok':True,'roundtrip_ok':True,
+                        'non_target_rows_unchanged':True,'original_database_written':False,
+                        'client_rendering_verified':False,**metadata}
 
     @staticmethod
     def _matches(db,friend,avatar,invalidate):

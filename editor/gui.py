@@ -7,8 +7,10 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QListWidgetItem, QFileDialog, QMessageBox)
 from .core import Store, normalize_image, Writer, UnsupportedWrite, State
 from .reader import Session, auto_detect_db_dir, list_accounts
-from .windows import discover
+from .windows import discover, WRITE_VERSIONS
 from .offline import OfflineAvatar, OfflineError
+from .compatibility import CompatibilityError
+from .cipher_stage import CipherError
 from .observe import read_current
 
 class Loader(QThread):
@@ -19,9 +21,12 @@ class Loader(QThread):
         self.root, self.account = root, account
     def run(self):
         session = None
+        stage = '版本识别'
         try:
-            executable, _ = discover()  # Fail closed on unsupported versions.
+            executable, detected_version = discover()  # Fail closed on unsupported versions.
+            stage = '所选账号密钥读取'
             session = Session(self.root, self.account)
+            stage = '联系人查询'
             contacts = session.reader.contacts()
             avatars = {}
             for contact in contacts:
@@ -29,10 +34,10 @@ class Loader(QThread):
                     avatars[contact['username']] = session.reader.avatar(contact['username'])
                 except Exception:
                     avatars[contact['username']] = None
-            self.ready.emit((self.account, contacts, avatars, session.write_context(executable)))
-        except Exception:
-            # Do not expose upstream exceptions containing sensitive paths/data.
-            self.failed.emit('读取失败：请确认微信版本为 4.1.13.65、已登录、账号目录正确且进程权限一致。尚未完成实机适配。')
+            self.ready.emit((self.account, contacts, avatars, session.write_context(executable, detected_version)))
+        except Exception as exc:
+            # Only expose stage and exception class, never raw keys or paths.
+            self.failed.emit(f'读取阶段：{stage}；错误类型：{type(exc).__name__}。'+'读取失败：请确认微信版本为 4.1.13.65 或 4.1.15.65、已登录、账号目录正确且进程权限一致。新版仅开放读取和副本检查。')
         finally:
             if session:
                 session.close()
@@ -51,7 +56,7 @@ class Window(QMainWindow):
         box = QWidget(); self.setCentralWidget(box)
         layout = QVBoxLayout(box)
         self.info = QLabel('正在识别微信环境……'); layout.addWidget(self.info)
-        layout.addWidget(QLabel('实验版：支持退出微信后写入头像库并备份；客户端显示待实测。昵称本地替换尚未适配。'))
+        layout.addWidget(QLabel('4.1.13.65：实验性写回；4.1.15.65：仅读取和副本检查。客户端显示待实测，昵称未适配。'))
         top = QHBoxLayout(); layout.addLayout(top)
         self.directory = QLineEdit(); self.directory.setPlaceholderText('微信数据根目录（其下包含各账号目录）')
         top.addWidget(self.directory)
@@ -71,6 +76,7 @@ class Window(QMainWindow):
         self.button(right, '选择新头像', self.choose_image)
         self.button(right, '保存配置（不会修改微信）', self.save)
         self.button(right, '应用至微信', self.apply)
+        self.button(right, '新版兼容性检查（不写原库）', self.probe)
         right.addStretch()
         bottom = QHBoxLayout(); layout.addLayout(bottom)
         self.button(bottom, '重新检查配置', self.check)
@@ -212,6 +218,8 @@ class Window(QMainWindow):
         context=self.contexts.get(self.account)
         if context is None:
             raise OfflineError('请先登录微信并读取此账号联系人，以取得本次运行所需的内存密钥')
+        if self.directory.text() and Path(self.directory.text()).resolve()!=context.account_root.parent.resolve():
+            raise OfflineError('数据目录已变化，请重新读取联系人')
         if self.accounts.currentData()!=self.account:
             raise OfflineError('所选账号已变化，请重新读取联系人')
         return context
@@ -230,6 +238,8 @@ class Window(QMainWindow):
             QMessageBox.information(self,'请选择头像','先选择一张自定义头像，或选择已有头像配置的好友。');return
         try:
             context=self.context()
+            if context.detected_version not in WRITE_VERSIONS:
+                raise OfflineError('此版本的原始库写入尚未开放。请运行“新版兼容性检查”，它只修改临时副本。')
             if not self.confirm_write('将替换选定好友在本机头像库中的头像。'): return
             # Persist the selected image before any write so retry never needs upload.
             self.store.save(self.account,c['username'],c['nick_name'] or '',self.avatars.get(c['username']),self.name.text().strip() or None,avatar)
@@ -238,6 +248,32 @@ class Window(QMainWindow):
             self.render()
             self.status.setText('加密头像库已写入并校验，备份已保存。现在可启动微信检查会话列表、聊天窗口和资料页；客户端生效尚待确认。')
             QMessageBox.information(self,'数据库写入完成','头像库已写入并校验。请重新打开微信检查实际头像。尚不能将数据库成功等同于客户端显示成功。')
+        except Exception as exc:
+            self.operation_error(exc)
+
+    def probe(self):
+        import json
+        import uuid
+        c=self.selected()
+        if not c or not self.pending_avatar:
+            QMessageBox.information(self,'请选择测试对象','先选择一个测试好友和自定义头像，再运行副本检查。');return
+        try:
+            context=self.context()
+            if QMessageBox.question(self,'新版兼容性检查',
+                '保持工具打开，完全退出微信及托盘后再确认。\n仅在临时加密副本中测试修改，不写入原始微信数据库。',
+                QMessageBox.StandardButton.Ok|QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)!=QMessageBox.StandardButton.Ok: return
+            report=self.offline.probe(context,c['username'],self.pending_avatar)
+            text=json.dumps(report,ensure_ascii=False,indent=2)
+            path=self.store.path.parent/('compatibility-'+uuid.uuid4().hex+'.json')
+            path.write_text(text,encoding='utf-8')
+            box=QMessageBox(self);box.setWindowTitle('副本兼容性检查通过')
+            box.setText('加密副本写入、读回和其他好友记录校验通过；原始头像库未改动。\n报告不含好友 ID、昵称、头像、数据路径或密钥。新版原始库写入仍未开放。')
+            box.setDetailedText(text)
+            copy=box.addButton('复制检查结果',QMessageBox.ButtonRole.ActionRole)
+            box.addButton('关闭',QMessageBox.ButtonRole.RejectRole);box.exec()
+            if box.clickedButton()==copy: QApplication.clipboard().setText(text)
+            self.status.setText('副本兼容性检查通过。报告已保存在工具配置目录；可复制结果用于下一步适配。')
         except Exception as exc:
             self.operation_error(exc)
 
@@ -282,7 +318,7 @@ class Window(QMainWindow):
 
     def operation_error(self,exc):
         # SQLCipher exceptions can contain internal paths. Never expose raw exceptions.
-        message=str(exc) if isinstance(exc,OfflineError) else '操作失败。请保持微信关闭，保留工具备份，点击“故障恢复”。未确认成功的操作不会显示为有效。'
+        message=str(exc) if isinstance(exc,(OfflineError,CompatibilityError,CipherError)) else '操作失败。请保持微信关闭，保留工具备份，点击“故障恢复”。未确认成功的操作不会显示为有效。'
         QMessageBox.warning(self,'操作未完成',message)
 
     def clear(self):

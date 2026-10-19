@@ -65,7 +65,7 @@ class Session:
             self.temp.cleanup()
             raise
 
-    def write_context(self, executable):
+    def write_context(self, executable, detected_version):
         from .offline import Context
         matches=[(rel,Path(path)) for rel,path,_ in self.reader._db_files if Path(path).name=='head_image.db']
         if len(matches)!=1:
@@ -74,7 +74,7 @@ class Session:
         key=self.reader._keys.get(rel)
         if key is None: return None
         return Context(source.absolute(),Path(self.reader.account_dir).absolute(),
-                       self.reader.account,Path(executable).absolute(),key)
+                       self.reader.account,Path(executable).absolute(),key,detected_version)
 
     def close(self):
         self.reader._keys.clear()

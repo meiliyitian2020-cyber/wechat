@@ -29,7 +29,7 @@ def fixture(tmp_path):
         db.executemany('INSERT INTO head_image VALUES (?,?,?,?)',[('friend',b'old','',0),('untouched',b'other','',0)])
         db.commit()
     context=Context(source,root,'account',tmp_path/'Weixin.exe',key)
-    service=OfflineAvatar(tmp_path/'backups',_lock=FileLock,_guard=lambda:None,_validate=lambda c:None,_version=lambda c:None)
+    service=OfflineAvatar(tmp_path/'backups',_lock=FileLock,_guard=lambda:None,_validate=lambda c:None,_version=lambda c:None,_read_version=lambda c:None)
     return context,service
 
 def avatar(context,friend='friend'):
@@ -174,6 +174,76 @@ def test_gui_cancel_does_not_touch_database(fixture,tmp_path,monkeypatch):
     window.items.setCurrentRow(0);window.pending_avatar=b'custom'
     monkeypatch.setattr(window,'confirm_write',lambda text:False)
     window.apply()
+    assert context.source.read_bytes()==before
+    assert not service.backup_root.exists()
+    assert window.close();app.processEvents()
+
+def test_new_version_probe_checks_real_copy_without_original_writes(fixture,tmp_path,monkeypatch):
+    import editor.offline as offline
+    context,_=fixture;context.detected_version='4.1.15.65'
+    monkeypatch.setattr(offline,'version',lambda path:'4.1.15.65')
+    service=OfflineAvatar(tmp_path/'candidate-backups',_lock=FileLock,_guard=lambda:None)
+    original=context.source.read_bytes()
+    report=service.probe(context,'friend',b'private-custom-avatar')
+    assert report['wechat_version']=='4.1.15.65'
+    assert report['source_unchanged'] and report['roundtrip_ok'] and report['non_target_rows_unchanged']
+    assert not report['original_database_written']
+    assert not report['client_rendering_verified']
+    assert context.source.read_bytes()==original
+    assert not service.backup_root.exists()
+    text=json.dumps(report)
+    for private in [context.account, str(context.source), context.key.hex(), 'private-custom-avatar']:
+        assert private not in text
+    # A successful copy test is not permission to change the original DB.
+    with pytest.raises(OfflineError,match='尚未开放'): service.apply(context,'friend',b'new')
+    assert context.source.read_bytes()==original
+
+@pytest.mark.parametrize('operation',['probe','apply'])
+def test_unrecognized_trigger_is_rejected_before_source_changes(fixture,operation):
+    from editor.compatibility import CompatibilityError
+    context,service=fixture
+    with closing(open_cipher(context.source,context.key)) as db:
+        db.execute("CREATE TRIGGER side_effect AFTER UPDATE ON head_image BEGIN UPDATE head_image SET image_buffer=x'00' WHERE username='untouched'; END")
+        db.commit()
+    original=context.source.read_bytes()
+    with pytest.raises(CompatibilityError,match='触发器'):
+        getattr(service,operation)(context,'friend',b'new')
+    assert context.source.read_bytes()==original
+    assert avatar(context,'untouched')==b'other'
+
+def test_old_loaded_context_is_not_reused_after_wechat_update(fixture,tmp_path,monkeypatch):
+    import editor.offline as offline
+    context,_=fixture
+    monkeypatch.setattr(offline,'version',lambda path:'4.1.15.65')
+    service=OfflineAvatar(tmp_path/'updated-backups',_lock=FileLock,_guard=lambda:None)
+    original=context.source.read_bytes()
+    with pytest.raises(OfflineError,match='版本变化'): service.probe(context,'friend',b'new')
+    with pytest.raises(OfflineError,match='版本变化'): service.apply(context,'friend',b'new')
+    assert context.source.read_bytes()==original
+
+def test_candidate_gui_can_probe_but_refuses_original_writes(fixture,tmp_path,monkeypatch):
+    from PySide6.QtWidgets import QApplication,QMessageBox
+    import editor.gui as gui
+    def unavailable(): raise RuntimeError('test-only')
+    monkeypatch.setattr(gui,'discover',unavailable)
+    monkeypatch.setattr(QMessageBox,'question',lambda *args: QMessageBox.StandardButton.Ok)
+    monkeypatch.setattr(QMessageBox,'exec',lambda self:0)
+    warnings=[]
+    monkeypatch.setattr(QMessageBox,'warning',lambda *args: warnings.append(args[2]))
+    context,service=fixture;context.detected_version='4.1.15.65'
+    app=QApplication.instance() or QApplication([])
+    store=Store(tmp_path/'candidate-ui');window=gui.Window(store);window.offline=service
+    window.accounts.addItem('account','account')
+    window.loaded(('account',[{'username':'friend','nick_name':'测试好友','remark':''}],{},context))
+    window.items.setCurrentRow(0);window.pending_avatar=b'candidate-avatar'
+    before=context.source.read_bytes()
+    window.probe()
+    reports=list(store.path.parent.glob('compatibility-*.json'))
+    assert len(reports)==1
+    assert json.loads(reports[0].read_text(encoding='utf-8'))['roundtrip_ok']
+    assert not warnings
+    window.apply()
+    assert warnings and '尚未开放' in warnings[-1]
     assert context.source.read_bytes()==before
     assert not service.backup_root.exists()
     assert window.close();app.processEvents()

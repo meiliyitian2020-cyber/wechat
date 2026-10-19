@@ -103,3 +103,11 @@ GitHub Actions run 39211328364，提交 10dcd3e，状态 SUCCESS，耗时 1m39s�
 观察读回和头像记录清除；不访问用户微信数据。不能替代真实微信的三处头像显示和收发消息验收。
 下载： https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39211673240/artifacts/12168305639
 GitHub artifact 下载需要登录，解压后运行 dist/WeChatLocalProfileEditor.exe。
+
+## 4.1.15.65 候选检查版本
+
+Linux：52 passed，1 skipped（Windows 独占句柄测试）。
+新增版本策略测试、读取后升级拒绝、新版原库写入拒绝、实际加密副本探测、非目标行与隐私验证、
+未知触发器拒绝和 GUI 副本检查/写入阻断测试。
+EXE 内置自检新增副本兼容性检查，Windows 构建将实际运行该路径；结果以新 Actions 为准。
+4.1.15.65 的真实联系人读取、副本探测、原版客户端显示均尚未取得新实测结果，原库写入默认禁用。

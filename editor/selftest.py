@@ -28,7 +28,7 @@ def run(output):
             # These bypasses apply only to this function's freshly generated fixture.
             # The real Windows exclusive file handle is deliberately NOT bypassed.
             service=OfflineAvatar(Path(temp)/'backups',_guard=lambda:None,
-                                  _validate=lambda c:None,_version=lambda c:None)
+                                  _validate=lambda c:None,_version=lambda c:None,_read_version=lambda c:None)
             original=source.read_bytes()
             bundle=Path(service.apply(context,'artificial-friend',b'custom'))
             report['stages'].append('exclusive_writeback')
@@ -36,6 +36,13 @@ def run(output):
             seen=read_current(context,['artificial-friend'],_validate=lambda c:None)
             if seen['artificial-friend']!=b'custom': raise RuntimeError('readback mismatch')
             report['stages'].append('encrypted_observation')
+            context.detected_version='4.1.15.65'
+            snapshot=source.read_bytes()
+            probe=service.probe(context,'artificial-friend',b'probe-only-avatar')
+            if not probe['roundtrip_ok'] or source.read_bytes()!=snapshot:
+                raise RuntimeError('candidate probe mismatch')
+            report['stages'].append('candidate_copy_compatibility_probe')
+            context.detected_version='4.1.13.65'
             service.invalidate(context,'artificial-friend')
             with closing(open_cipher(source,key)) as db:
                 if db.execute('SELECT count(*) FROM head_image').fetchone()[0]!=0:
