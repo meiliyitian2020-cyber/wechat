@@ -56,7 +56,7 @@ class Window(QMainWindow):
         box = QWidget(); self.setCentralWidget(box)
         layout = QVBoxLayout(box)
         self.info = QLabel('正在识别微信环境……'); layout.addWidget(self.info)
-        layout.addWidget(QLabel('4.1.13.65：实验性写回；4.1.15.65：仅读取和副本检查。客户端显示待实测，昵称未适配。'))
+        layout.addWidget(QLabel('4.1.13.65：实验性写回；4.1.15.65：先检查副本，通过后可仅本次试验写入。客户端显示待实测，昵称未适配。'))
         top = QHBoxLayout(); layout.addLayout(top)
         self.directory = QLineEdit(); self.directory.setPlaceholderText('微信数据根目录（其下包含各账号目录）')
         top.addWidget(self.directory)
@@ -230,7 +230,7 @@ class Window(QMainWindow):
             QMessageBox.StandardButton.Ok|QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel)==QMessageBox.StandardButton.Ok
 
-    def apply(self):
+    def apply(self, candidate_trial=False):
         c=self.selected()
         if not c: return
         avatar=self.pending_avatar
@@ -238,12 +238,12 @@ class Window(QMainWindow):
             QMessageBox.information(self,'请选择头像','先选择一张自定义头像，或选择已有头像配置的好友。');return
         try:
             context=self.context()
-            if context.detected_version not in WRITE_VERSIONS:
-                raise OfflineError('此版本的原始库写入尚未开放。请运行“新版兼容性检查”，它只修改临时副本。')
+            if context.detected_version not in WRITE_VERSIONS and not candidate_trial:
+                raise OfflineError('此版本默认原始库写入尚未开放。请先运行新版兼容性检查，通过后选择“仅本次试验应用”。')
             if not self.confirm_write('将替换选定好友在本机头像库中的头像。'): return
             # Persist the selected image before any write so retry never needs upload.
             self.store.save(self.account,c['username'],c['nick_name'] or '',self.avatars.get(c['username']),self.name.text().strip() or None,avatar)
-            backup=self.offline.apply(context,c['username'],avatar)
+            backup=self.offline.apply(context,c['username'],avatar,_candidate_trial=candidate_trial)
             self.store.record_applied(self.account,c['username'],backup)
             self.render()
             self.status.setText('加密头像库已写入并校验，备份已保存。现在可启动微信检查会话列表、聊天窗口和资料页；客户端生效尚待确认。')
@@ -251,11 +251,11 @@ class Window(QMainWindow):
         except Exception as exc:
             self.operation_error(exc)
 
-    def probe(self):
+    def probe(self, _restore=False):
         import json
         import uuid
         c=self.selected()
-        if not c or not self.pending_avatar:
+        if not c or (not self.pending_avatar and not _restore):
             QMessageBox.information(self,'请选择测试对象','先选择一个测试好友和自定义头像，再运行副本检查。');return
         try:
             context=self.context()
@@ -263,23 +263,29 @@ class Window(QMainWindow):
                 '保持工具打开，完全退出微信及托盘后再确认。\n仅在临时加密副本中测试修改，不写入原始微信数据库。',
                 QMessageBox.StandardButton.Ok|QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel)!=QMessageBox.StandardButton.Ok: return
-            report=self.offline.probe(context,c['username'],self.pending_avatar)
+            report=self.offline.probe(context,c['username'],None if _restore else self.pending_avatar,_invalidate=_restore)
             text=json.dumps(report,ensure_ascii=False,indent=2)
             path=self.store.path.parent/('compatibility-'+uuid.uuid4().hex+'.json')
             path.write_text(text,encoding='utf-8')
             box=QMessageBox(self);box.setWindowTitle('副本兼容性检查通过')
-            box.setText('加密副本写入、读回和其他好友记录校验通过；原始头像库未改动。\n报告不含好友 ID、昵称、头像、数据路径或密钥。新版原始库写入仍未开放。')
+            box.setText('加密副本写入、读回和其他好友记录校验通过；原始头像库未改动。\n报告不含好友 ID、昵称、头像、数据路径或密钥。默认不写原库；可选择仅本次试验操作，仍需确认客户端显示。')
             box.setDetailedText(text)
             copy=box.addButton('复制检查结果',QMessageBox.ButtonRole.ActionRole)
-            box.addButton('关闭',QMessageBox.ButtonRole.RejectRole);box.exec()
+            trial=box.addButton('仅本次试验恢复' if _restore else '仅本次试验应用',QMessageBox.ButtonRole.AcceptRole)
+            close=box.addButton('关闭',QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(close);box.exec()
+            if box.clickedButton()==trial:
+                if _restore: self.restore(candidate_trial=True)
+                else: self.apply(candidate_trial=True)
+                return
             if box.clickedButton()==copy: QApplication.clipboard().setText(text)
-            self.status.setText('副本兼容性检查通过。报告已保存在工具配置目录；可复制结果用于下一步适配。')
+            self.status.setText('副本兼容性检查通过，报告已保存。本次未改动原库；要测试实际显示，可重新检查后选择仅本次试验应用。')
         except Exception as exc:
             self.operation_error(exc)
 
     def reapply_expired(self):
         if not self.expired: return
-        if not self.confirm_write('将直接复用已保存的头像，逐个重新应用失效记录。'): return
+        if not self.confirm_write('将复用已保存的头像重新应用。新版会逐个先检查副本，再仅本次试验写回。'): return
         records={(r['account'],r['friend']):r for r in self.store.rows()}
         done=0
         try:
@@ -287,7 +293,9 @@ class Window(QMainWindow):
                 context=self.contexts.get(account)
                 if context is None: raise OfflineError('部分账号尚未在本次运行读取，无法取得密钥')
                 record=records[(account,friend)]
-                backup=self.offline.apply(context,friend,record['desired_avatar'])
+                candidate=context.detected_version not in WRITE_VERSIONS
+                if candidate: self.offline.probe(context,friend,record['desired_avatar'])
+                backup=self.offline.apply(context,friend,record['desired_avatar'],_candidate_trial=candidate)
                 self.store.record_applied(account,friend,backup);done+=1
             self.expired=[];self.render()
             self.status.setText(f'{done} 项头像库记录已重新应用并校验；请启动微信检查客户端显示。')
@@ -295,13 +303,15 @@ class Window(QMainWindow):
             self.status.setText(f'已重新应用 {done} 项，其余未完成。')
             self.operation_error(exc)
 
-    def restore(self):
+    def restore(self, candidate_trial=False):
         c=self.selected()
         if not c: return
         try:
             context=self.context()
+            if context.detected_version not in WRITE_VERSIONS and not candidate_trial:
+                self.probe(_restore=True);return
             if not self.confirm_write('将清除指定好友在头像库中的缓存记录，让微信尝试重新获取当前头像。不会写回可能过时的原图；工具配置保留。'): return
-            backup=self.offline.invalidate(context,c['username'])
+            backup=self.offline.invalidate(context,c['username'],_candidate_trial=candidate_trial)
             self.store.record_invalidated(self.account,c['username'],backup)
             self.render();self.status.setText('指定头像缓存记录已清除。请重启微信等待重新获取头像；其他缓存显示尚未验证。')
         except Exception as exc:

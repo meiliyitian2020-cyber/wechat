@@ -247,3 +247,95 @@ def test_candidate_gui_can_probe_but_refuses_original_writes(fixture,tmp_path,mo
     assert context.source.read_bytes()==before
     assert not service.backup_root.exists()
     assert window.close();app.processEvents()
+
+@pytest.fixture
+def candidate(fixture,tmp_path,monkeypatch):
+    import editor.offline as offline
+    context,_=fixture;context.detected_version='4.1.15.65'
+    monkeypatch.setattr(offline,'version',lambda path:'4.1.15.65')
+    service=OfflineAvatar(tmp_path/'trial-backups',_lock=FileLock,_guard=lambda:None)
+    return context,service
+
+def test_candidate_trial_requires_actual_memory_probe(candidate):
+    context,service=candidate;original=context.source.read_bytes()
+    with pytest.raises(OfflineError,match='副本检查'):
+        service.apply(context,'friend',b'new',_candidate_trial=True)
+    assert context.source.read_bytes()==original
+
+def test_candidate_trial_writes_only_probed_data_once(candidate):
+    context,service=candidate;original=context.source.read_bytes()
+    service.probe(context,'friend',b'new')
+    bundle=Path(service.apply(context,'friend',b'new',_candidate_trial=True))
+    assert avatar(context)==b'new' and avatar(context,'untouched')==b'other'
+    assert (bundle/'original.enc').read_bytes()==original
+    record=json.loads((bundle/'operation.json').read_text())
+    assert record['candidate_trial'] and record['wechat_version']=='4.1.15.65'
+    assert record['state']=='committed'
+    with pytest.raises(OfflineError,match='副本检查'):
+        service.apply(context,'friend',b'new',_candidate_trial=True)
+
+@pytest.mark.parametrize('change',['image','expired','source'])
+def test_candidate_trial_rejects_stale_or_mismatched_proof(candidate,change):
+    context,service=candidate
+    service.probe(context,'friend',b'new')
+    desired=b'new'
+    if change=='image': desired=b'different'
+    elif change=='expired': service._probes[(id(context),'friend',False)]['time']-=301
+    else:
+        with closing(open_cipher(context.source,context.key)) as db:
+            db.execute('UPDATE head_image SET image_buffer=? WHERE username=?',(b'external-sync','untouched'));db.commit()
+    before=context.source.read_bytes()
+    with pytest.raises(OfflineError): service.apply(context,'friend',desired,_candidate_trial=True)
+    assert context.source.read_bytes()==before
+
+def test_candidate_restore_needs_its_own_delete_probe(candidate):
+    context,service=candidate
+    service.probe(context,'friend',b'new')
+    with pytest.raises(OfflineError): service.invalidate(context,'friend',_candidate_trial=True)
+    report=service.probe(context,'friend',None,_invalidate=True)
+    assert report['operation']=='invalidate'
+    service.invalidate(context,'friend',_candidate_trial=True)
+    assert avatar(context) is None and avatar(context,'untouched')==b'other'
+
+def test_candidate_interrupted_trial_can_recover_same_version(candidate):
+    context,service=candidate;original=context.source.read_bytes()
+    service.probe(context,'friend',b'new')
+    bundle=Path(service.apply(context,'friend',b'new',_candidate_trial=True))
+    jp=bundle/'operation.json';record=json.loads(jp.read_text());record['state']='writing';jp.write_text(json.dumps(record))
+    assert service.recover('account',context=context)==1
+    assert context.source.read_bytes()==original
+
+@pytest.mark.parametrize('operation',['probe','apply'])
+def test_virtual_avatar_table_is_not_an_adapted_schema(fixture,operation):
+    from editor.compatibility import CompatibilityError
+    context,service=fixture
+    with closing(open_cipher(context.source,context.key)) as db:
+        db.execute('DROP TABLE head_image')
+        db.execute('CREATE VIRTUAL TABLE head_image USING fts5(username,image_buffer,md5,update_time)')
+        db.execute('INSERT INTO head_image VALUES(?,?,?,?)',('friend',b'old','',0));db.commit()
+    before=context.source.read_bytes()
+    with pytest.raises(CompatibilityError,match='普通数据表'):
+        getattr(service,operation)(context,'friend',b'new')
+    assert context.source.read_bytes()==before
+
+def test_candidate_gui_explicit_trial_button_reaches_guarded_write(fixture,tmp_path,monkeypatch):
+    from PySide6.QtWidgets import QApplication,QMessageBox
+    import editor.gui as gui
+    def unavailable(): raise RuntimeError('test-only')
+    monkeypatch.setattr(gui,'discover',unavailable)
+    monkeypatch.setattr(QMessageBox,'question',lambda *args: QMessageBox.StandardButton.Ok)
+    monkeypatch.setattr(QMessageBox,'exec',lambda self:0)
+    monkeypatch.setattr(QMessageBox,'clickedButton',lambda box: next((b for b in box.buttons() if b.text()=='仅本次试验应用'),None))
+    monkeypatch.setattr(QMessageBox,'information',lambda *args: QMessageBox.StandardButton.Ok)
+    monkeypatch.setattr(QMessageBox,'warning',lambda *args: (_ for _ in ()).throw(AssertionError('unexpected dialog')))
+    context,service=fixture;context.detected_version='4.1.15.65'
+    app=QApplication.instance() or QApplication([])
+    store=Store(tmp_path/'trial-ui');window=gui.Window(store);window.offline=service
+    window.accounts.addItem('account','account')
+    window.loaded(('account',[{'username':'friend','nick_name':'测试好友','remark':''}],{},context))
+    window.items.setCurrentRow(0);window.pending_avatar=b'trial-from-ui'
+    window.probe()
+    assert avatar(context)==b'trial-from-ui'
+    assert store.rows()[0]['last_applied']
+    assert store.rows()[0]['state']==State.UNKNOWN.value
+    assert window.close();app.processEvents()

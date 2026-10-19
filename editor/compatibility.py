@@ -10,7 +10,10 @@ def inspect_head(db):
     columns=db.execute('PRAGMA table_info(head_image)').fetchall()
     if not {'username','image_buffer','md5','update_time'} <= {r[1] for r in columns}:
         raise CompatibilityError('头像表结构未适配')
-    if db.execute("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='head_image'").fetchone()[0]:
+    tables=db.execute("SELECT type FROM pragma_table_list WHERE schema='main' AND name='head_image' COLLATE NOCASE").fetchall()
+    if tables!=[('table',)]:
+        raise CompatibilityError('头像库不是已适配的普通数据表')
+    if db.execute("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='head_image' COLLATE NOCASE").fetchone()[0]:
         raise CompatibilityError('头像表存在未适配触发器，禁止修改')
     schema=db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name').fetchall()
     return {'schema_sha256':hashlib.sha256(json.dumps(schema,ensure_ascii=False).encode()).hexdigest(),

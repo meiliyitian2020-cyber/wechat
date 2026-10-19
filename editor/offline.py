@@ -14,9 +14,10 @@ import json
 import os
 import tempfile
 import uuid
+import time
 from .cipher_stage import open_cipher, verify_pages, CipherError
 from .core import now
-from .windows import ensure_wechat_stopped, version, TARGET, check_read_version, check_write_version
+from .windows import ensure_wechat_stopped, version, TARGET, check_read_version, check_write_version, WRITE_VERSIONS
 from .compatibility import inspect_head, other_rows_digest, CompatibilityError
 
 class OfflineError(RuntimeError):
@@ -125,10 +126,24 @@ class OfflineAvatar:
         self.backup_root=Path(backup_root)
         self.lock,self.guard,self.validate,self.check_version=_lock,_guard,_validate,_version
         self.check_read_version=_read_version
+        self._probes={}
 
-    def apply(self,context,friend,avatar,*,_fault=None,_invalidate=False):
+    def apply(self,context,friend,avatar,*,_fault=None,_invalidate=False,_candidate_trial=False):
         if not friend or (not avatar and not _invalidate): raise OfflineError('未选择好友或自定义头像')
-        self.validate(context);self.check_version(context);self.guard();no_sidecars(context.source)
+        self.validate(context)
+        trial=_candidate_trial and context.detected_version not in WRITE_VERSIONS
+        proof_key=(id(context),friend,bool(_invalidate))
+        proof=None
+        if trial:
+            self.check_read_version(context)
+            proof=self._probes.get(proof_key)
+            if (not proof or proof['version']!=context.detected_version
+                    or proof['source_path']!=str(context.source.absolute()) or proof['account']!=context.account
+                    or proof['avatar_hash']!=hash_bytes(avatar or b'') or time.monotonic()-proof['time']>300):
+                raise OfflineError('需要先对当前好友和图片完成本次副本检查；检查凭据已缺失或过期')
+        else:
+            self.check_version(context)
+        self.guard();no_sidecars(context.source)
         source_path=context.source.resolve(strict=True)
         root=self.backup_root.resolve()
         if root.is_relative_to(context.account_root.resolve()):
@@ -142,6 +157,8 @@ class OfflineAvatar:
         with self.lock(context.source) as locked:
             self.guard();no_sidecars(context.source)
             original=locked.read()
+            if trial and hash_bytes(original)!=proof['source_hash']:
+                raise OfflineError('原始头像库在副本检查后发生变化，请重新检查，禁止沿用旧检查结果')
             with tempfile.TemporaryDirectory(prefix='avatar-transaction-') as temp:
                 stage=Path(temp)/'head_image.db';stage.write_bytes(original)
                 verify_pages(stage,context.key)
@@ -165,11 +182,19 @@ class OfflineAvatar:
                     if not self._matches(db,friend,avatar,_invalidate):
                         raise OfflineError('目标头像校验失败')
                 replacement=stage.read_bytes()
-                self.guard();self.check_version(context);no_sidecars(context.source)
+                self.guard()
+                if trial: self.check_read_version(context)
+                else: self.check_version(context)
+                no_sidecars(context.source)
+                if trial:
+                    if time.monotonic()-proof['time']>300 or self._probes.get(proof_key) is not proof:
+                        raise OfflineError('副本检查凭据已过期或被使用，请重新检查')
+                    self._probes.pop(proof_key)
                 if locked.read()!=original: raise OfflineError('头像库已发生变化，禁止继续')
                 bundle=root/uuid.uuid4().hex;bundle.mkdir()
                 durable(bundle/'original.enc',original)
                 record={'schema':1,'account':context.account,'friend':friend,'action':'invalidate' if _invalidate else 'apply','source':str(source_path),
+                        'wechat_version':context.detected_version,'candidate_trial':bool(trial),
                         'state':'prepared','created':now(),'original_hash':hash_bytes(original),
                         'replacement_hash':hash_bytes(replacement),'wal_present':False,'shm_present':False}
                 jp=bundle/'operation.json';journal(jp,record)
@@ -196,9 +221,9 @@ class OfflineAvatar:
                     raise OfflineError('写入失败，已恢复操作前的加密头像库') from None
         return str(bundle)
 
-    def probe(self,context,friend,avatar):
+    def probe(self,context,friend,avatar,*,_invalidate=False):
         """Offline dry-run on a private encrypted copy. Original is never written."""
-        if not friend or not avatar: raise OfflineError('请先选择测试好友和自定义头像')
+        if not friend or (not avatar and not _invalidate): raise OfflineError('请先选择测试好友和自定义头像')
         self.validate(context);self.guard();no_sidecars(context.source)
         with self.lock(context.source) as locked:
             self.guard();no_sidecars(context.source)
@@ -214,18 +239,26 @@ class OfflineAvatar:
                         db.execute('BEGIN IMMEDIATE')
                         if db.execute('SELECT count(*) FROM head_image WHERE username=?',(friend,)).fetchone()[0]!=1:
                             raise OfflineError('测试好友头像记录缺失或不唯一')
-                        db.execute('UPDATE head_image SET image_buffer=?,md5=?,update_time=? WHERE username=?',
-                                   (avatar,hashlib.md5(avatar).hexdigest(),int(__import__('time').time()),friend))
+                        if _invalidate:
+                            db.execute('DELETE FROM head_image WHERE username=?',(friend,))
+                        else:
+                            db.execute('UPDATE head_image SET image_buffer=?,md5=?,update_time=? WHERE username=?',
+                                       (avatar,hashlib.md5(avatar).hexdigest(),int(time.time()),friend))
                 verify_pages(path,context.key)
                 with closing(open_cipher(path,context.key)) as db:
-                    if not self._matches(db,friend,avatar,False): raise OfflineError('副本目标记录验证失败')
+                    if not self._matches(db,friend,avatar,_invalidate): raise OfflineError('副本目标记录验证失败')
                     if other_rows_digest(db,friend)!=before: raise OfflineError('副本修改影响了其他好友')
                     if db.execute('PRAGMA foreign_key_check').fetchall(): raise OfflineError('副本关联完整性检查失败')
                     engine=db.execute('PRAGMA cipher_version').fetchone()[0]
                     if inspect_head(db)!=metadata: raise OfflineError('副本表结构发生变化')
                 self.guard();self.check_read_version(context);no_sidecars(context.source)
                 if locked.read()!=original: raise OfflineError('源文件发生变化，检查结果无效')
+                self._probes[(id(context),friend,bool(_invalidate))]={
+                    'source_path':str(context.source.absolute()),'account':context.account,
+                    'source_hash':hash_bytes(original),'avatar_hash':hash_bytes(avatar or b''),
+                    'version':context.detected_version,'time':time.monotonic()}
                 return {'report_version':1,'wechat_version':context.detected_version,
+                        'operation':'invalidate' if _invalidate else 'apply',
                         'cipher_version':engine,'page_size':4096,'reserve_bytes':80,
                         'source_unchanged':True,'all_page_hmac_ok':True,'roundtrip_ok':True,
                         'non_target_rows_unchanged':True,'original_database_written':False,
@@ -236,9 +269,9 @@ class OfflineAvatar:
         rows=db.execute('SELECT image_buffer FROM head_image WHERE username=?',(friend,)).fetchall()
         return not rows if invalidate else len(rows)==1 and rows[0][0]==avatar
 
-    def invalidate(self,context,friend):
+    def invalidate(self,context,friend,*,_candidate_trial=False):
         # Request WeChat to fetch an avatar, rather than reinstating a stale backup.
-        return self.apply(context,friend,None,_invalidate=True)
+        return self.apply(context,friend,None,_invalidate=True,_candidate_trial=_candidate_trial)
 
     def recover(self,account,*,context=None):
         """Recover interrupted operations only when no third-party changes exist."""
@@ -251,6 +284,8 @@ class OfflineAvatar:
         for jp in self.backup_root.glob('*/operation.json'):
             record=json.loads(jp.read_text(encoding='utf-8'))
             if record.get('account')!=account or record.get('state') not in {'prepared','writing','recovery_required'}: continue
+            if context is not None and record.get('wechat_version',TARGET)!=context.detected_version:
+                raise OfflineError('恢复记录与当前微信版本不匹配，禁止跨版本恢复')
             source=Path(record['source'])
             if context is not None and source!=context.source.resolve(): raise OfflineError('恢复来源与当前账号不匹配')
             original=(jp.parent/'original.enc').read_bytes()
@@ -259,7 +294,7 @@ class OfflineAvatar:
             self.guard();no_sidecars(source)
             with self.lock(source) as locked:
                 self.guard();no_sidecars(source)
-                if context is not None: self.check_version(context)
+                if context is not None: self.check_read_version(context)
                 current=hash_bytes(locked.read())
                 if current not in {record['original_hash'],record['replacement_hash']}:
                     raise OfflineError('检测到部分写入或微信后续变化，无法自动区分。已停止恢复以保护现有数据。')

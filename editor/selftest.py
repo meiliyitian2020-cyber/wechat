@@ -42,8 +42,12 @@ def run(output):
             if not probe['roundtrip_ok'] or source.read_bytes()!=snapshot:
                 raise RuntimeError('candidate probe mismatch')
             report['stages'].append('candidate_copy_compatibility_probe')
-            context.detected_version='4.1.13.65'
-            service.invalidate(context,'artificial-friend')
+            service.apply(context,'artificial-friend',b'probe-only-avatar',_candidate_trial=True)
+            seen=read_current(context,['artificial-friend'],_validate=lambda c:None)
+            if seen['artificial-friend']!=b'probe-only-avatar': raise RuntimeError('candidate trial mismatch')
+            report['stages'].append('candidate_gated_trial_write')
+            service.probe(context,'artificial-friend',None,_invalidate=True)
+            service.invalidate(context,'artificial-friend',_candidate_trial=True)
             with closing(open_cipher(source,key)) as db:
                 if db.execute('SELECT count(*) FROM head_image').fetchone()[0]!=0:
                     raise RuntimeError('invalidation mismatch')
