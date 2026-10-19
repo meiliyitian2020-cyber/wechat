@@ -73,11 +73,12 @@ class Timeline:
 class LoginTrace(QThread):
     progress = Signal(int)
     def __init__(self, context, friend, timeline, *, reader=read_details, process=wechat_running,
-                 interval=2, duration=180):
+                 interval=2, duration=180, clock=time.monotonic):
         super().__init__()
         self.context, self.friend, self.timeline = context, friend, timeline
         self.reader, self.process = reader, process
         self.interval, self.duration = interval, duration
+        self.clock = clock
         self.stop_event = Event()
         self.result = None
 
@@ -85,10 +86,10 @@ class LoginTrace(QThread):
         self.stop_event.set()
 
     def run(self):
-        start = time.monotonic()
+        start = self.clock()
         try:
             while not self.stop_event.wait(self.interval):
-                elapsed = time.monotonic() - start
+                elapsed = self.clock() - start
                 if elapsed >= self.duration:
                     break
                 try:

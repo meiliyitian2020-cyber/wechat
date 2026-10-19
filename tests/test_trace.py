@@ -43,10 +43,12 @@ def test_unchanged_samples_are_compacted_without_losing_sample_count():
 
 def test_sampler_is_bounded_and_stops_without_leaving_thread_or_exposing_errors():
     timeline = Timeline(row(), '4.1.15.56')
+    logical_time = [0.0]
     def unavailable(*args):
+        logical_time[0] = 1.0
         raise RuntimeError('private-secret-error')
     worker = LoginTrace(object(), 'private-friend', timeline, reader=unavailable,
-                        process=lambda:True, interval=.005, duration=.03)
+                        process=lambda:True, interval=.005, duration=.03, clock=lambda:logical_time[0])
     worker.start()
     assert worker.wait(1000)
     assert not worker.isRunning()

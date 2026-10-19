@@ -95,7 +95,7 @@ def run(output):
                               context.detected_version)
             sampler=LoginTrace(context,'artificial-friend',timeline,
                                reader=lambda c,f:read_details(c,f,_validate=lambda c:None),
-                               process=lambda:False,interval=.01,duration=.06)
+                               process=lambda:False,interval=.01,duration=.5)
             sampler.start()
             if not sampler.wait(5000) or sampler.isRunning():
                 raise RuntimeError('diagnostic thread did not stop')
