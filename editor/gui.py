@@ -13,7 +13,8 @@ from .offline import OfflineAvatar, OfflineError
 from .compatibility import CompatibilityError
 from .cipher_stage import CipherError
 from .diagnostics import login_report
-from .observe import read_current
+from .observe import read_current, read_details
+from .trace import LoginTrace, Timeline, wechat_running
 
 class Loader(QThread):
     ready = Signal(object)
@@ -53,11 +54,12 @@ class Window(QMainWindow):
         super().__init__()
         self.store, self.contacts, self.avatars, self.account = store, [], {}, None
         self.worker = None
+        self.trace_worker = None
         self.contexts = {}
         self.offline = OfflineAvatar(store.path.parent / 'backups')
         self.expired = []
         self.pending_avatar = None
-        self.setWindowTitle('微信本地身份工具 · 实验性离线头像替换 · WAL修正版')
+        self.setWindowTitle('微信本地身份工具 · 实验性离线头像替换 · 简易诊断版')
         self.resize(1020, 640)
         box = QWidget(); self.setCentralWidget(box)
         layout = QVBoxLayout(box)
@@ -84,6 +86,7 @@ class Window(QMainWindow):
         self.button(right, '应用至微信', self.apply)
         self.button(right, '新版兼容性检查（不写原库）', self.probe)
         self.button(right, '登录后头像诊断（只读）', self.diagnose_login)
+        self.trace_button = self.button(right, '开始一键诊断', self.guided_trace)
         right.addStretch()
         bottom = QHBoxLayout(); layout.addLayout(bottom)
         self.button(bottom, '重新检查配置', self.check)
@@ -107,6 +110,7 @@ class Window(QMainWindow):
     @staticmethod
     def button(layout, text, callback):
         b = QPushButton(text); b.clicked.connect(callback); layout.addWidget(b)
+        return b
 
     def choose_dir(self):
         directory = QFileDialog.getExistingDirectory(self, '选择微信数据根目录')
@@ -195,6 +199,70 @@ class Window(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self,'无法保存',str(exc))
 
+    def guided_trace(self):
+        if self.trace_worker and self.trace_worker.isRunning():
+            self.trace_button.setEnabled(False)
+            self.trace_button.setText('正在结束诊断……')
+            self.trace_worker.stop()
+            return
+        c = self.selected()
+        if not c: return
+        row = next((r for r in self.store.rows() if r['account'] == self.account
+                    and r['friend'] == c['username']), None)
+        if not row or not row['desired_avatar']:
+            QMessageBox.information(self, '请选择测试好友', '请选择之前保存过自定义头像的好友，无须重新选图片。')
+            return
+        try:
+            context = self.context()
+            if QMessageBox.question(self, '一键诊断',
+                '请保持本工具打开，完全退出微信（含托盘），然后点“确定”。\n'
+                '工具将自动备份、检查并试验写入这位好友的已保存头像一次，然后开始只读采集。\n'
+                '看到“正在诊断”后，登录微信并打开该好友聊天窗口，再点“结束诊断并复制报告”。\n'
+                '最多采集 3 分钟，不安装服务、不上传数据；本次仍用于定位，尚非修复。',
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Ok: return
+            self.offline.probe(context, c['username'], row['desired_avatar'])
+            backup = self.offline.apply(context, c['username'], row['desired_avatar'], _candidate_trial=True)
+            self.store.record_applied(self.account, c['username'], backup)
+            row = dict(row, last_applied=True)
+            timeline = Timeline(row, context.detected_version)
+            try:
+                details = read_details(context, c['username'])
+            except Exception:
+                details = None
+            timeline.add(0, details, wechat_running())
+            worker = LoginTrace(context, c['username'], timeline)
+            self.trace_worker = worker
+            worker.progress.connect(lambda seconds: self.status.setText(
+                f'正在诊断（{seconds} 秒）：请登录微信并打开该好友聊天窗口，随后点击“结束诊断并复制报告”。'))
+            worker.finished.connect(self.trace_finished)
+            self.trace_button.setText('结束诊断并复制报告')
+            self.status.setText('正在诊断：请登录微信，打开该好友聊天窗口，再点“结束诊断并复制报告”。')
+            worker.start()
+        except Exception as exc:
+            self.operation_error(exc)
+
+    def trace_finished(self):
+        worker = self.trace_worker
+        self.trace_button.setEnabled(True)
+        self.trace_button.setText('开始一键诊断')
+        self.trace_worker = None
+        if not worker or worker.result is None:
+            self.status.setText('诊断未完成，未生成报告。')
+            return
+        text = json.dumps(worker.result, ensure_ascii=False, indent=2)
+        QApplication.clipboard().setText(text)
+        report_path = self.store.path.parent / 'login-diagnostic.json'
+        try:
+            report_path.write_text(text, encoding='utf-8')
+            saved = f'报告同时保存在：{report_path}'
+        except OSError:
+            saved = '报告文件保存失败，但已复制到剪贴板。'
+        self.status.setText('诊断已结束，采集线程已退出。报告已复制，可直接粘贴发来。')
+        QMessageBox.information(self, '诊断已结束',
+            '脱敏报告已复制到剪贴板，回到对话直接粘贴即可。\n' + saved +
+            '\n报告不含好友身份、图片、密钥或微信数据路径。实际显示替换尚未修复。')
+
     def diagnose_login(self):
         c = self.selected()
         if not c: return
@@ -250,6 +318,8 @@ class Window(QMainWindow):
                 QMessageBox.information(self,'验证范围','检测比较当前头像库（包含稳定复制的 WAL）与已保存图片。不能证明客户端缓存显示，也不代表好友主动更新头像。')
 
     def context(self):
+        if self.trace_worker and self.trace_worker.isRunning():
+            raise OfflineError('正在诊断，请先点击“结束诊断并复制报告”，避免其他操作干扰结果')
         context=self.contexts.get(self.account)
         if context is None:
             raise OfflineError('请先登录微信并读取此账号联系人，以取得本次运行所需的内存密钥')
@@ -260,6 +330,9 @@ class Window(QMainWindow):
         return context
 
     def confirm_write(self,text):
+        if self.trace_worker and self.trace_worker.isRunning():
+            self.status.setText('请先结束诊断，再进行其他写入操作。')
+            return False
         return QMessageBox.question(self,'实验性头像操作',text+
             '\n请保持本工具打开，完全退出微信（含托盘）后再继续。工具不会自动结束微信。\n会建立加密备份；客户端显示效果仍需确认，昵称不会修改。',
             QMessageBox.StandardButton.Ok|QMessageBox.StandardButton.Cancel,
@@ -376,6 +449,10 @@ class Window(QMainWindow):
             self.store.clear_config(self.account,c['username']); self.render()
 
     def closeEvent(self, event):
+        if self.trace_worker and self.trace_worker.isRunning():
+            self.trace_worker.stop()
+            self.status.setText('正在停止诊断，请稍后再关闭。报告将自动复制。')
+            event.ignore(); return
         if self.worker and self.worker.isRunning():
             self.status.setText('读取正在进行，请等待完成后退出，避免遗留解密临时文件。')
             event.ignore(); return

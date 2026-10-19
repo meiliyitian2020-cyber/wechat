@@ -485,3 +485,35 @@ def test_uncommitted_valid_frames_are_not_mistaken_for_commits(fixture):
     service.apply(context,'friend',b'custom')
     # The other avatar update was never committed in this synthetic WAL.
     assert avatar(context,'untouched')==b'other'
+
+
+def test_readonly_diagnostic_metadata_reflects_actual_encrypted_record(fixture):
+    from editor.observe import read_details
+    import hashlib
+    context, service = fixture
+    service.apply(context, 'friend', b'custom')
+    before = context.source.read_bytes()
+    observed = read_details(context, 'friend', _validate=lambda c:None)
+    assert observed['image'] == b'custom'
+    assert observed['md5'] == hashlib.md5(b'custom').hexdigest()
+    assert isinstance(observed['update_time'], int)
+    assert context.source.read_bytes() == before
+
+
+def test_timeline_detects_replacement_in_real_encrypted_database_without_sampler_writes(fixture):
+    from editor.trace import Timeline
+    from editor.observe import read_details
+    context, service = fixture
+    service.apply(context, 'friend', b'custom')
+    timeline = Timeline(dict(desired_avatar=b'custom', original_avatar=b'old', last_applied=True),
+                        context.detected_version)
+    timeline.add(0, read_details(context, 'friend', _validate=lambda c:None), False)
+    # Simulate a later independent writer, not the sampling code.
+    service.apply(context, 'friend', b'refreshed')
+    before = context.source.read_bytes()
+    timeline.add(2, read_details(context, 'friend', _validate=lambda c:None), True)
+    assert context.source.read_bytes() == before
+    report = timeline.report('test')
+    assert report['replacement_after_custom_observed'] is True
+    assert report['events'][-1]['md5_matches_image_bytes'] is True
+    assert report['events'][-1]['image_changed_since_last_read'] is True

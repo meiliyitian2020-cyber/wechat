@@ -84,6 +84,20 @@ def run(output):
             if not window.close(): raise RuntimeError('window did not close')
             app.processEvents()
             report['stages'].append('packaged_qt_gui_startup_and_shutdown')
+            from .trace import Timeline, LoginTrace
+            from .observe import read_details
+            baseline=source.read_bytes()
+            timeline=Timeline(dict(desired_avatar=b'custom',original_avatar=b'original',last_applied=True),
+                              context.detected_version)
+            sampler=LoginTrace(context,'artificial-friend',timeline,
+                               reader=lambda c,f:read_details(c,f,_validate=lambda c:None),
+                               process=lambda:False,interval=.01,duration=.06)
+            sampler.start()
+            if not sampler.wait(5000) or sampler.isRunning():
+                raise RuntimeError('diagnostic thread did not stop')
+            if sampler.result is None or sampler.result['samples'] < 1 or source.read_bytes()!=baseline:
+                raise RuntimeError('diagnostic sampler failed')
+            report['stages'].append('packaged_bounded_readonly_diagnostic_thread')
         report['ok']=True;code=0
     except Exception as exc:
         report['error_type']=type(exc).__name__

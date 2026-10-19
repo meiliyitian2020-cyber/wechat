@@ -10,7 +10,7 @@ from .cipher_stage import open_cipher, verify_pages
 from .offline import OfflineError, validate_context
 from .wal import validate_wal
 
-def read_current(context, friends, *, _validate=validate_context):
+def read_current(context, friends, *, _validate=validate_context, _details=False):
     _validate(context)
     source=context.source
     for attempt in range(3):
@@ -40,11 +40,18 @@ def read_current(context, friends, *, _validate=validate_context):
                         raise OfflineError('加密数据库完整性校验失败')
                     result={}
                     for friend in friends:
-                        rows=db.execute('SELECT image_buffer FROM head_image WHERE username=?',(friend,)).fetchall()
+                        columns='image_buffer,md5,update_time' if _details else 'image_buffer'
+                        rows=db.execute('SELECT '+columns+' FROM head_image WHERE username=?',(friend,)).fetchall()
                         if len(rows)>1: raise OfflineError('头像记录不唯一')
                         # Empty bytes means an observed missing record, distinct from read failure.
-                        result[friend]=bytes(rows[0][0]) if rows and rows[0][0] else b''
+                        image=bytes(rows[0][0]) if rows and rows[0][0] else b''
+                        result[friend]=({'image':image, 'md5':rows[0][1] if rows else None,
+                                         'update_time':rows[0][2] if rows else None} if _details else image)
                 return result
             except (FileNotFoundError,PermissionError):
                 continue
     raise OfflineError('微信头像库正在变化或无法读取，当前无法验证')
+
+
+def read_details(context, friend, *, _validate=validate_context):
+    return read_current(context, [friend], _validate=_validate, _details=True)[friend]
