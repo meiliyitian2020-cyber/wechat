@@ -58,3 +58,15 @@ Windows 构建不安装此 Linux 研究依赖，因此该组实验在 Windows �
 统一使用 sqlcipher3==0.6.4；在本环境实际运行 26 passed，0 failed，0 skipped。
 之前关于 Windows 不安装 SQLCipher、对应测试会跳过的说明不再适用于最新配置：
 最新 requirements 包含引擎，加密测试不再使用 importorskip，缺少引擎会让测试失败。
+
+## Windows 用户运行日志（提交 76d5e13）
+
+用户提供的日志：Windows / Python 3.12.10，26 项收集，25 passed、1 failed。
+6 项 SQLCipher 暂存实验全部通过，证明该机器可以加载引擎并完成人工加密库读写、回滚与校验。
+失败发生在 test_reject_symlink 的测试准备阶段：Windows 禁止普通用户创建符号链接，WinError 1314。
+并非备份模块接受了危险路径，也不是加密写入测试失败。
+
+修复：仅在 Windows 创建真实符号链接遇到 WinError 1314 时将对应集成测试记为 skipped；
+其他错误仍然失败。另增一项无需创建权限的链接检测分支测试，检查拒绝操作、不创建备份及源文件不变。
+修复后 Linux：27 passed。受限 Windows 预期为 26 passed、1 skipped，尚待该版本日志确认。
+不要求提升权限或打开开发者模式。真实微信数据库修改和客户端显示效果仍未验证。

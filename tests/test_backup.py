@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import pytest
 from editor.backup import BackupManager, BackupError
 
@@ -53,9 +54,29 @@ def test_reject_unsafe_targets(source,tmp_path,relative):
 
 def test_reject_symlink(source,tmp_path):
     root,db=source
-    target=root/'contact.db'; target.symlink_to(db)
+    target=root/'contact.db'
+    try:
+        target.symlink_to(db)
+    except OSError as exc:
+        if os.name == 'nt' and getattr(exc, 'winerror', None) == 1314:
+            pytest.skip('Windows 当前用户没有创建符号链接的权限；仅跳过真实链接集成测试')
+        raise
     with pytest.raises(BackupError): BackupManager(tmp_path/'backups').create(root,['contact.db'],lambda:None)
 
 def test_no_backup_inside_account(source):
     root,db=source
     with pytest.raises(BackupError): BackupManager(root/'backups').create(root,[db.relative_to(root)],lambda:None)
+
+
+def test_symlink_guard_requires_no_creation_privilege(source, tmp_path, monkeypatch):
+    """Exercise fail-closed guard even when Windows denies link creation."""
+    root, db = source
+    relative = db.relative_to(root)
+    directory = root / 'db_storage'
+    original = Path.is_symlink
+    monkeypatch.setattr(Path, 'is_symlink',
+                        lambda path: path == directory or original(path))
+    with pytest.raises(BackupError, match='符号链接'):
+        BackupManager(tmp_path/'backups').create(root, [relative], lambda:None)
+    assert not (tmp_path/'backups').exists()
+    assert db.read_bytes() == b'encrypted-database-placeholder'
