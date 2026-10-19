@@ -84,7 +84,8 @@ def run(output):
             app=QApplication.instance() or QApplication([])
             window=gui.Window(Store(Path(temp)/'gui-state'))
             window.show();app.processEvents()
-            if window.name.isEnabled(): raise RuntimeError('unsupported nickname editor enabled')
+            if not window.name.isEnabled() or '待验收' not in window.name.placeholderText():
+                raise RuntimeError('experimental remark editor missing scope warning')
             if not window.close(): raise RuntimeError('window did not close')
             app.processEvents()
             report['stages'].append('packaged_qt_gui_startup_and_shutdown')
@@ -102,6 +103,40 @@ def run(output):
             if sampler.result is None or sampler.result['samples'] < 1 or source.read_bytes()!=baseline:
                 raise RuntimeError('diagnostic sampler failed')
             report['stages'].append('packaged_bounded_readonly_diagnostic_thread')
+            # A separate synthetic contact DB: original nickname CCCCC, remark A -> B.
+            from .local_remark import OfflineRemark, payload
+            from .observe import read_remark
+            remark_source=root/'db_storage/contact/contact.db'
+            remark_source.parent.mkdir(parents=True)
+            remark_key=secrets.token_bytes(32)
+            with closing(sql.connect(remark_source)) as db:
+                db.execute('PRAGMA key = "x\''+remark_key.hex()+'\'"')
+                db.execute('CREATE TABLE contact(username TEXT PRIMARY KEY,nick_name TEXT,remark TEXT,local_type INTEGER,flag INTEGER)')
+                db.execute('INSERT INTO contact VALUES(?,?,?,?,?)',('synthetic-contact','CCCCC','A',1,917))
+                db.execute('CREATE TABLE synthetic_sync_queue(id INTEGER,payload BLOB)')
+                db.execute('INSERT INTO synthetic_sync_queue VALUES(1,?)',(b'unchanged',))
+                db.commit()
+            remark_context=Context(remark_source,root,root.name,context.executable,remark_key,'4.1.15.56')
+            remark_service=OfflineRemark(Path(temp)/'remark-backups',_guard=lambda:None,
+                                         _validate=lambda c:None,_version=lambda c:None,_read_version=lambda c:None)
+            original=remark_source.read_bytes()
+            probe=remark_service.probe(remark_context,'synthetic-contact',payload('B'))
+            if remark_source.read_bytes()!=original or not probe['target_non_remark_fields_unchanged']:
+                raise RuntimeError('remark copy probe failed')
+            remark_service.apply(remark_context,'synthetic-contact',payload('B'),_candidate_trial=True)
+            current=read_remark(remark_context,'synthetic-contact',_validate=lambda c:None)
+            if current['name']!='B' or current['nickname']!='CCCCC':
+                raise RuntimeError('remark or original nickname mismatch')
+            with closing(open_cipher(remark_source,remark_key)) as db:
+                if db.execute('SELECT flag FROM contact').fetchone()[0]!=917:
+                    raise RuntimeError('remark trial modified flags')
+                if db.execute('SELECT * FROM synthetic_sync_queue').fetchall()!=[(1,b'unchanged')]:
+                    raise RuntimeError('remark trial modified other tables')
+            remark_service.probe(remark_context,'synthetic-contact',payload('A'))
+            remark_service.apply(remark_context,'synthetic-contact',payload('A'),_candidate_trial=True)
+            if read_remark(remark_context,'synthetic-contact',_validate=lambda c:None)['name']!='A':
+                raise RuntimeError('remark restore mismatch')
+            report['stages'].append('packaged_synthetic_desktop_remark_A_B_A_and_protected_fields')
         report['ok']=True;code=0
     except Exception as exc:
         report['error_type']=type(exc).__name__

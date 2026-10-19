@@ -40,6 +40,11 @@ def read_current(context, friends, *, _validate=validate_context, _details=False
                         raise OfflineError('加密数据库完整性校验失败')
                     result={}
                     for friend in friends:
+                        if _details == 'remark':
+                            rows=db.execute('SELECT nick_name,remark,local_type FROM contact WHERE username=?',(friend,)).fetchall()
+                            if len(rows)>1: raise OfflineError('联系人记录不唯一')
+                            result[friend]=({'name':rows[0][1], 'nickname':rows[0][0], 'local_type':rows[0][2]} if rows else None)
+                            continue
                         columns='image_buffer,md5,update_time' if _details else 'image_buffer'
                         rows=db.execute('SELECT '+columns+' FROM head_image WHERE username=?',(friend,)).fetchall()
                         if len(rows)>1: raise OfflineError('头像记录不唯一')
@@ -55,3 +60,12 @@ def read_current(context, friends, *, _validate=validate_context, _details=False
 
 def read_details(context, friend, *, _validate=validate_context):
     return read_current(context, [friend], _validate=_validate, _details=True)[friend]
+
+
+def read_remarks(context, friends, *, _validate=None):
+    from .local_remark import validate_contact
+    return read_current(context, friends, _validate=_validate or validate_contact, _details='remark')
+
+
+def read_remark(context, friend, *, _validate=None):
+    return read_remarks(context, [friend], _validate=_validate)[friend]

@@ -91,12 +91,12 @@ def journal(path,data):
         json.dump(data,out,ensure_ascii=False);out.flush();os.fsync(out.fileno())
     os.replace(temp,path)
 
-def validate_context(context):
+def validate_context(context, *, _expected_database="head_image.db"):
     source=context.source.absolute()
     root=context.account_root.absolute()
     if not source.is_relative_to(root) or source.resolve(strict=True)!=source or root.resolve(strict=True)!=root:
         raise OfflineError('账号路径必须为真实目录')
-    if source.name!='head_image.db' or not source.resolve(strict=True).is_relative_to(root):
+    if source.name!=_expected_database or not source.resolve(strict=True).is_relative_to(root):
         raise OfflineError('头像库不属于选定账号')
     if root.name!=context.account:
         raise OfflineError('账号目录不匹配')
@@ -195,6 +195,9 @@ def prepare_copy(snapshot,key,temp):
     return path,stats
 
 class OfflineAvatar:
+    require_trial = False
+    database_name = "head_image.db"
+    write_strategy = WRITE_STRATEGY
     def __init__(self,backup_root,*,_lock=WindowsFile,_guard=ensure_wechat_stopped,_validate=validate_context,_version=validate_executable,_read_version=validate_read_executable):
         self.backup_root=Path(backup_root)
         self.lock,self.guard,self.validate,self.check_version=_lock,_guard,_validate,_version
@@ -238,7 +241,7 @@ class OfflineAvatar:
 
     def _check_proof(self,context,friend,avatar,invalidate):
         key=(id(context),friend,bool(invalidate));proof=self._probes.get(key)
-        if (not proof or proof.get('write_strategy')!=WRITE_STRATEGY or proof['version']!=context.detected_version
+        if (not proof or proof.get('write_strategy')!=self.write_strategy or proof['version']!=context.detected_version
                 or proof['source_path']!=str(context.source.absolute()) or proof['account']!=context.account
                 or proof['avatar_hash']!=hash_bytes(avatar or b'') or time.monotonic()-proof['time']>300):
             raise OfflineError('需要先对当前好友和图片完成本次副本检查；检查凭据已缺失或过期')
@@ -247,7 +250,7 @@ class OfflineAvatar:
     def apply(self,context,friend,avatar,*,_fault=None,_invalidate=False,_candidate_trial=False):
         if not friend or (not avatar and not _invalidate): raise OfflineError('未选择好友或自定义头像')
         self.validate(context)
-        trial=_candidate_trial and context.detected_version not in WRITE_VERSIONS
+        trial=_candidate_trial and (self.require_trial or context.detected_version not in WRITE_VERSIONS)
         proof_key=proof=None
         if trial:
             self.check_read_version(context)
@@ -287,7 +290,7 @@ class OfflineAvatar:
                                    'replacement_hash':hash_bytes(replacement[suffix]) if replacement[suffix] is not None else None,
                                    'backup':BACKUP_NAMES[suffix] if data is not None else None}
                 record={'schema':2,'account':context.account,'friend':friend,'action':'invalidate' if _invalidate else 'apply',
-                        'source':str(source_path),'wechat_version':context.detected_version,'candidate_trial':bool(trial),'write_strategy':'delete_target_avatar_record' if _invalidate else WRITE_STRATEGY,
+                        'source':str(source_path),'wechat_version':context.detected_version,'candidate_trial':bool(trial),'write_strategy':'delete_target_avatar_record' if _invalidate else self.write_strategy,
                         'state':'prepared','created':now(),'files':files,'original_hash':hash_bytes(original['']),
                         'replacement_hash':hash_bytes(replacement['']),'wal_present':original['-wal'] is not None,
                         'shm_present':original['-shm'] is not None}
@@ -329,8 +332,8 @@ class OfflineAvatar:
                 self._probes[(id(context),friend,bool(_invalidate))]={
                     'source_path':str(context.source.absolute()),'account':context.account,
                     'source_hash':fingerprint(original),'avatar_hash':hash_bytes(avatar or b''),
-                    'version':context.detected_version,'time':time.monotonic(),'write_strategy':WRITE_STRATEGY}
-                return {'report_version':3,'write_strategy':'delete_target_avatar_record' if _invalidate else WRITE_STRATEGY,
+                    'version':context.detected_version,'time':time.monotonic(),'write_strategy':self.write_strategy}
+                return {'report_version':3,'write_strategy':'delete_target_avatar_record' if _invalidate else self.write_strategy,
                         'target_non_image_fields_unchanged':None if _invalidate else True,'wechat_version':context.detected_version,
                         'operation':'invalidate' if _invalidate else 'apply','cipher_version':engine,
                         'page_size':4096,'reserve_bytes':80,'source_unchanged':True,'all_page_hmac_ok':True,
@@ -353,7 +356,7 @@ class OfflineAvatar:
             if context is not None and record.get('wechat_version',TARGET)!=context.detected_version:
                 raise OfflineError('恢复记录与当前微信版本不匹配，禁止跨版本恢复')
             path=Path(record['source'])
-            if path.name!='head_image.db' or (context is not None and path!=context.source.resolve()):
+            if path.name!=self.database_name or (context is not None and path!=context.source.resolve()):
                 raise OfflineError('恢复来源与当前账号不匹配')
             files=record.get('files')
             if files is None:

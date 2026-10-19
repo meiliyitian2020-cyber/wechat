@@ -65,9 +65,9 @@ class Session:
             self.temp.cleanup()
             raise
 
-    def write_context(self, executable, detected_version):
+    def write_context(self, executable, detected_version, database="head_image.db"):
         from .offline import Context
-        matches=[(rel,Path(path)) for rel,path,_ in self.reader._db_files if Path(path).name=='head_image.db']
+        matches=[(rel,Path(path)) for rel,path,_ in self.reader._db_files if Path(path).name==database]
         if len(matches)!=1:
             return None
         rel,source=matches[0]

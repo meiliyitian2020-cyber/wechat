@@ -106,3 +106,40 @@ class LoginTrace(QThread):
         finally:
             # QThread finished signal is emitted only after run returns.
             self.context = None
+
+
+class RemarkTimeline:
+    def __init__(self, version, desired):
+        self.version, self.desired = version, desired
+        self.events, self.previous = [], None
+        self.samples = self.failures = 0
+
+    def add(self, elapsed, details, running):
+        self.samples += 1
+        if details is None: self.failures += 1
+        event = {'elapsed_seconds':round(elapsed,1), 'wechat_process_running':running,
+                 'observation':'unverifiable' if details is None else
+                     ('desired_name_present' if details['name']==self.desired else 'other_name_present')}
+        if details is not None:
+            event['remark_present'] = details['name'] not in (None,'')
+            if self.previous is not None:
+                event['name_changed_since_last_read'] = details['name']!=self.previous['name']
+                event['original_nickname_changed_since_last_read'] = details['nickname']!=self.previous['nickname']
+            self.previous = details
+        signature={k:v for k,v in event.items() if k!='elapsed_seconds'}
+        previous={k:v for k,v in self.events[-1].items() if k!='elapsed_seconds'} if self.events else None
+        if signature!=previous: self.events.append(event)
+
+    def report(self, reason):
+        from .local_remark import STRATEGY
+        seen=False;replaced=False
+        for event in self.events:
+            if event['observation']=='desired_name_present': seen=True
+            elif seen and event['observation']=='other_name_present': replaced=True
+        return {'report_version':1,'operation':'desktop_remark_guided_login_timeline','write_strategy':STRATEGY,
+                'wechat_version':self.version,'stop_reason':reason,'samples':self.samples,
+                'read_failures':self.failures,'custom_remark_observed':seen,'replacement_after_custom_observed':replaced,
+                'client_rendering_verified':False,'remote_non_sync_verified':False,
+                'source_written_by_sampler':False,'guided_trial_write_performed':True,
+                'scope':'仅定向本机备注缓存采样，不含名字、身份或密钥；不能证明客户端显示或远端不同步。',
+                'events':self.events}

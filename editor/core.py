@@ -48,6 +48,51 @@ class Store:
               state TEXT NOT NULL, scope TEXT NOT NULL,
               PRIMARY KEY(account, friend))''')
 
+    def remark_rows(self):
+        with closing(self.connect()) as db, db:
+            db.execute("""CREATE TABLE IF NOT EXISTS local_remark_profiles (
+                account TEXT, friend TEXT, original_name TEXT NOT NULL, desired_name TEXT NOT NULL,
+                last_applied TEXT, last_verified TEXT, state TEXT NOT NULL, scope TEXT NOT NULL,
+                PRIMARY KEY(account,friend))""")
+            return [dict(r) for r in db.execute('SELECT * FROM local_remark_profiles ORDER BY account,friend')]
+
+    def save_remark(self, account, friend, original, desired):
+        from .local_remark import payload
+        payload(desired)
+        if not account or not friend or not isinstance(original, str): raise ValueError('备注配置缺少目标')
+        self.remark_rows()
+        with closing(self.connect()) as db, db:
+            db.execute("""INSERT INTO local_remark_profiles VALUES (?,?,?,?,NULL,NULL,?,?)
+                ON CONFLICT(account,friend) DO UPDATE SET desired_name=excluded.desired_name,
+                last_applied=NULL,last_verified=NULL,state=excluded.state,scope=excluded.scope
+                WHERE local_remark_profiles.desired_name IS NOT excluded.desired_name""",
+                (account,friend,original,desired,State.UNKNOWN.value,'仅保存本机备注试验配置，尚未写入微信'))
+
+    def record_remark(self, account, friend, *, applied=False, restored=False, observed=None):
+        self.remark_rows()
+        with closing(self.connect()) as db, db:
+            row=db.execute('SELECT * FROM local_remark_profiles WHERE account=? AND friend=?',(account,friend)).fetchone()
+            if row is None: return
+            state=State.UNKNOWN
+            scope='无法读取当前备注缓存；未验证客户端显示与远端不同步'
+            last=row['last_applied']
+            if applied:
+                last=now();scope='仅联系人备注缓存写入校验通过；客户端显示和远端不同步尚未验证'
+            elif restored:
+                last=None;scope='已写回保存的原备注缓存；客户端显示及远端状态尚未验证'
+            elif observed is not None:
+                if observed.get('name')==row['desired_name']:
+                    scope='备注缓存一致；客户端显示与远端不同步仍未验证'
+                elif last:
+                    state=State.INVALID;scope='备注缓存已变化；未验证客户端显示'
+            db.execute('UPDATE local_remark_profiles SET last_applied=?,last_verified=?,state=?,scope=? WHERE account=? AND friend=?',
+                       (last,now(),state.value,scope,account,friend))
+
+    def clear_remark(self, account, friend):
+        self.remark_rows()
+        with closing(self.connect()) as db, db:
+            db.execute('DELETE FROM local_remark_profiles WHERE account=? AND friend=?',(account,friend))
+
     def connect(self):
         db = sqlite3.connect(self.path)
         db.row_factory = sqlite3.Row

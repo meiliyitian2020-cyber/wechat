@@ -32,7 +32,7 @@ jobs:
           Get-Content executable-selftest.json
       - uses: actions/upload-artifact@v4
         with:
-          name: WeChatLocalProfileEditor-Preserve-Metadata-Trial
+          name: WeChatLocalProfileEditor-Desktop-Remark-Trial
           path: |
             dist/WeChatLocalProfileEditor.exe
             executable-selftest.json

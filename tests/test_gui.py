@@ -78,3 +78,47 @@ def test_guided_diagnostic_reuses_saved_photo_and_copies_report(tmp_path, monkey
     assert w.trace_worker is None
     assert w.trace_button.text() == '开始一键诊断（保留字段）'
     assert w.close()
+
+
+def test_desktop_remark_a_b_flow_reuses_config_and_preserves_avatar(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QMessageBox
+    from editor.trace import LoginTrace
+    from editor.local_remark import decode
+    monkeypatch.setattr('editor.gui.discover',lambda:(_ for _ in ()).throw(RuntimeError('synthetic')))
+    monkeypatch.setattr(QMessageBox,'question',lambda *args:QMessageBox.StandardButton.Ok)
+    monkeypatch.setattr(QMessageBox,'information',lambda *args:QMessageBox.StandardButton.Ok)
+    app=QApplication.instance() or QApplication([])
+    store=Store(tmp_path)
+    store.save('a','f','CCCCC',b'original-avatar',None,b'custom-avatar')
+    w=Window(store)
+    w.loaded(('a',[{'username':'f','nick_name':'CCCCC','remark':'A'}],{}))
+    w.items.setCurrentRow(0);w.name.setText('B')
+    context=SimpleNamespace(detected_version='4.1.15.56')
+    monkeypatch.setattr(w,'context',lambda kind='avatar':context)
+    operations=[]
+    monkeypatch.setattr(w.remarks,'probe',lambda ctx,friend,data:operations.append(('probe',decode(data))))
+    monkeypatch.setattr(w.remarks,'original_name',lambda *args:'A')
+    monkeypatch.setattr(w.remarks,'apply',lambda ctx,friend,data,**kwargs:operations.append(('apply',decode(data))))
+    observed={'name':'B','nickname':'CCCCC','local_type':1}
+    monkeypatch.setattr('editor.gui.read_remark',lambda *args:observed)
+    monkeypatch.setattr('editor.gui.wechat_running',lambda:False)
+    monkeypatch.setattr('editor.gui.LoginTrace',lambda ctx,friend,timeline,**kwargs:LoginTrace(
+        ctx,friend,timeline,reader=lambda *args:observed,process=lambda:True,interval=.01,duration=.05))
+    w.remark_trial()
+    assert w.name_worker is not None
+    assert w.name_worker.wait(1000);app.processEvents()
+    assert operations==[('probe','B'),('apply','B')]
+    row=store.remark_rows()[0]
+    assert row['original_name']=='A' and row['desired_name']=='B' and row['last_applied']
+    assert store.rows()[0]['desired_avatar']==b'custom-avatar'
+    report=json.loads(app.clipboard().text())
+    assert report['operation']=='desktop_remark_guided_login_timeline'
+    assert report['remote_non_sync_verified'] is False
+    assert report['custom_remark_observed'] is True
+    assert (tmp_path/'desktop-remark-diagnostic.json').exists()
+    assert w.name_worker is None
+    w.select()
+    assert w.name.text()=='B'
+    assert w.close()

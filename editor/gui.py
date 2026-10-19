@@ -5,7 +5,7 @@ from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtGui import QPixmap, QIcon
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QLineEdit, QComboBox, QListWidget,
-    QListWidgetItem, QFileDialog, QMessageBox)
+    QListWidgetItem, QFileDialog, QMessageBox, QScrollArea)
 from .core import Store, normalize_image, Writer, UnsupportedWrite, State
 from .reader import Session, auto_detect_db_dir, list_accounts
 from .windows import discover, WRITE_VERSIONS, READ_VERSIONS, VersionError
@@ -14,7 +14,9 @@ from .compatibility import CompatibilityError
 from .cipher_stage import CipherError
 from .diagnostics import login_report
 from .observe import read_current, read_details
-from .trace import LoginTrace, Timeline, wechat_running
+from .trace import LoginTrace, Timeline, RemarkTimeline, wechat_running
+from .local_remark import OfflineRemark, payload as remark_payload
+from .observe import read_remark, read_remarks
 
 class Loader(QThread):
     ready = Signal(object)
@@ -37,7 +39,8 @@ class Loader(QThread):
                     avatars[contact['username']] = session.reader.avatar(contact['username'])
                 except Exception:
                     avatars[contact['username']] = None
-            self.ready.emit((self.account, contacts, avatars, session.write_context(executable, detected_version)))
+            self.ready.emit((self.account, contacts, avatars, session.write_context(executable, detected_version),
+                             session.write_context(executable, detected_version, "contact.db")))
         except Exception as exc:
             # Only expose stage and exception class, never raw keys or paths.
             if isinstance(exc,VersionError):
@@ -55,16 +58,19 @@ class Window(QMainWindow):
         self.store, self.contacts, self.avatars, self.account = store, [], {}, None
         self.worker = None
         self.trace_worker = None
+        self.name_worker = None
+        self.name_contexts = {}
         self.contexts = {}
         self.offline = OfflineAvatar(store.path.parent / 'backups')
+        self.remarks = OfflineRemark(store.path.parent / 'remark-backups')
         self.expired = []
         self.pending_avatar = None
-        self.setWindowTitle('微信本地身份工具 · 实验性离线头像替换 · 保留字段试验版')
+        self.setWindowTitle('微信本地身份工具 · 实验性离线头像替换 · 头像与本机备注缓存试验版')
         self.resize(1020, 640)
         box = QWidget(); self.setCentralWidget(box)
         layout = QVBoxLayout(box)
         self.info = QLabel('正在识别微信环境……'); layout.addWidget(self.info)
-        layout.addWidget(QLabel('4.1.13.65：实验性写回；4.1.15.56 / 4.1.15.65：先检查副本，通过后可仅本次试验写入。客户端显示待实测，昵称未适配。'))
+        layout.addWidget(QLabel('4.1.13.65：实验性写回；4.1.15.56 / 4.1.15.65：先检查副本，通过后可仅本次试验写入。本机备注覆盖为试验功能，手机备注不变尚未验收。'))
         top = QHBoxLayout(); layout.addLayout(top)
         self.directory = QLineEdit(); self.directory.setPlaceholderText('微信数据根目录（其下包含各账号目录）')
         top.addWidget(self.directory)
@@ -76,14 +82,22 @@ class Window(QMainWindow):
         self.search = QLineEdit(); self.search.setPlaceholderText('搜索昵称、备注、微信 ID')
         self.search.textChanged.connect(self.render); left.addWidget(self.search)
         self.items = QListWidget(); self.items.currentItemChanged.connect(self.select); left.addWidget(self.items)
-        right = QVBoxLayout(); body.addLayout(right, 2)
+        right_widget=QWidget(); right=QVBoxLayout(right_widget)
+        right_scroll=QScrollArea(); right_scroll.setWidgetResizable(True); right_scroll.setWidget(right_widget)
+        body.addWidget(right_scroll,2)
         self.preview = QLabel('原头像'); self.preview.setMinimumSize(128,128); right.addWidget(self.preview)
         self.identity = QLabel('请选择好友'); self.identity.setWordWrap(True); right.addWidget(self.identity)
         self.desired_preview = QLabel('未选择自定义头像'); right.addWidget(self.desired_preview)
-        self.name = QLineEdit(); self.name.setPlaceholderText('昵称纯本地替换尚未适配'); self.name.setEnabled(False); right.addWidget(self.name)
+        right.addWidget(QLabel('本机备注覆盖（试验）'))
+        self.name = QLineEdit(); self.name.setPlaceholderText('电脑显示文字 B；手机原备注 A 应保持不变（待验收）'); right.addWidget(self.name)
+        self.remark_button = self.button(right, '本机备注覆盖试验', self.remark_trial)
+        self.button(right, '恢复电脑原备注缓存', self.restore_remark)
+        self.button(right, '清除本机备注配置（不恢复微信）', self.clear_remark)
+        self.button(right, '备注故障恢复', self.recover_remark)
+        right.addWidget(QLabel('头像替换'))
         self.button(right, '选择新头像', self.choose_image)
-        self.button(right, '保存配置（不会修改微信）', self.save)
-        self.button(right, '应用至微信', self.apply)
+        self.button(right, '保存头像配置（不会修改微信）', self.save)
+        self.button(right, '应用头像至微信', self.apply)
         self.button(right, '新版兼容性检查（不写原库）', self.probe)
         self.button(right, '登录后头像诊断（只读）', self.diagnose_login)
         self.trace_button = self.button(right, '开始一键诊断（保留字段）', self.guided_trace)
@@ -139,19 +153,24 @@ class Window(QMainWindow):
         self.account, self.contacts, self.avatars = result[:3]
         if len(result)>3 and result[3] is not None:
             self.contexts[self.account]=result[3]
+        if len(result)>4 and result[4] is not None:
+            self.name_contexts[self.account]=result[4]
         self.render()
         self.status.setText(f'读取 {len(self.contacts)} 个联系人；头像来自解密快照，不能证明微信显示结果。')
         self.check()
 
     def render(self):
         records = {(r['account'],r['friend']):r for r in self.store.rows()}
+        remark_records={(r['account'],r['friend']):r for r in self.store.remark_rows()}
         query = self.search.text().casefold()
         self.items.clear()
-        contacts = sorted(self.contacts, key=lambda c: (self.account,c['username']) not in records)
+        contacts = sorted(self.contacts, key=lambda c: (self.account,c['username']) not in records and (self.account,c['username']) not in remark_records)
         for c in contacts:
             if query not in ' '.join(str(v or '') for v in c.values()).casefold(): continue
             r = records.get((self.account,c['username']))
             text = f"{c['remark'] or c['nick_name'] or c['username']}\n{c['username']} · " + (f"已配置 / {r['state']}" if r else '未修改')
+            remark=remark_records.get((self.account,c['username']))
+            if remark: text+=f" / 本机备注试验：{remark['state']}"
             item = QListWidgetItem(text); item.setData(Qt.ItemDataRole.UserRole,c)
             pix = QPixmap()
             if self.avatars.get(c['username']):
@@ -176,6 +195,10 @@ class Window(QMainWindow):
                 self.name.setText(row['desired_name'] or '')
                 self.pending_avatar = row['desired_avatar']; self.show_desired()
                 self.status.setText(row['scope']); break
+        for row in self.store.remark_rows():
+            if (row['account'],row['friend']) == (self.account,c['username']):
+                self.name.setText(row['desired_name'])
+                self.status.setText(row['scope']); break
 
     def show_desired(self):
         if self.pending_avatar:
@@ -194,10 +217,82 @@ class Window(QMainWindow):
         if not c: return
         try:
             self.store.save(self.account,c['username'],c['nick_name'] or '',self.avatars.get(c['username']),
-                            self.name.text().strip() or None,self.pending_avatar)
+                            None,self.pending_avatar)
             self.render(); self.status.setText('配置已持久保存；此步骤未写入微信。')
         except ValueError as exc:
             QMessageBox.warning(self,'无法保存',str(exc))
+
+    def remark_trial(self, restore=False):
+        if self.name_worker and self.name_worker.isRunning():
+            self.name_worker.stop()
+            self.remark_button.setEnabled(False)
+            self.remark_button.setText('正在结束备注诊断……')
+            return
+        c=self.selected()
+        if not c: return
+        if not c.get('remark'):
+            QMessageBox.information(self,'没有原备注','请选择已经设置手机备注的测试好友。')
+            return
+        row=next((r for r in self.store.remark_rows() if (r['account'],r['friend'])==(self.account,c['username'])),None)
+        try:
+            context=self.context('remark')
+            if restore and row is None: raise OfflineError('没有保存的原备注缓存')
+            name=row['original_name'] if restore else self.name.text().strip()
+            data=remark_payload(name,restore=restore)
+            if QMessageBox.question(self,'本机备注覆盖试验 · 不同步尚未验证',
+                '请先用测试联系人验收：目标为电脑显示 B、手机保留 A。尚未验证手机备注绝不会变化。\n'
+                '本次只修改本机数据库 remark 缓存，保留原昵称、身份 ID、同步标志和其他记录；不调用官方备注功能。\n'
+                '请完全退出微信（含托盘），再点确定。工具会备份、校验并试写一次。\n'
+                '随后登录微信，检查名称及手机是否变化，最后点“结束备注诊断并复制报告”。',
+                QMessageBox.StandardButton.Ok|QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)!=QMessageBox.StandardButton.Ok: return
+            self.remarks.probe(context,c['username'],data)
+            original=self.remarks.original_name(context,c['username'],data)
+            if not restore: self.store.save_remark(self.account,c['username'],original,name)
+            self.remarks.apply(context,c['username'],data,_candidate_trial=True)
+            self.store.record_remark(self.account,c['username'],applied=not restore,restored=restore)
+            timeline=RemarkTimeline(context.detected_version,name)
+            try: current=read_remark(context,c['username'])
+            except Exception: current=None
+            timeline.add(0,current,wechat_running())
+            worker=LoginTrace(context,c['username'],timeline,reader=read_remark)
+            self.name_worker=worker
+            worker.progress.connect(lambda seconds:self.status.setText(
+                f'备注采集 {seconds} 秒：请登录微信检查实际名称及手机，再点击结束。缓存一致不代表纯本地。'))
+            worker.finished.connect(self.remark_finished)
+            self.remark_button.setText('结束备注诊断并复制报告')
+            self.status.setText('本机备注缓存已试写，正在只读采集。请登录微信检查显示及手机，再点结束。')
+            worker.start()
+        except Exception as exc: self.operation_error(exc)
+
+    def remark_finished(self):
+        worker=self.name_worker;self.name_worker=None
+        self.remark_button.setEnabled(True)
+        self.remark_button.setText('本机备注覆盖试验')
+        if not worker or worker.result is None:
+            self.status.setText('备注采集未生成报告。');return
+        text=json.dumps(worker.result,ensure_ascii=False,indent=2)
+        QApplication.clipboard().setText(text)
+        try: (self.store.path.parent/'desktop-remark-diagnostic.json').write_text(text,encoding='utf-8')
+        except OSError: pass
+        self.status.setText('备注脱敏报告已复制；未验证客户端显示和远端不同步。')
+        QMessageBox.information(self,'备注诊断结束','报告已复制，直接粘贴发来即可。\n请另外说明电脑名称是否变化、重启是否保留，以及手机名称是否变化。报告不包含任何实际备注。')
+
+    def restore_remark(self):
+        self.remark_trial(restore=True)
+
+    def clear_remark(self):
+        c=self.selected()
+        if c and QMessageBox.question(self,'仅清除本机备注配置','不会恢复微信缓存。确定清除这个好友的本机备注配置？')==QMessageBox.StandardButton.Yes:
+            self.store.clear_remark(self.account,c['username']);self.name.clear()
+
+    def recover_remark(self):
+        try:
+            context=self.context('remark')
+            if not self.confirm_write('将恢复此账号未完成的备注数据库写入；仅处理能识别的备份状态。'):return
+            count=self.remarks.recover(self.account,context=context)
+            self.status.setText(f'已恢复 {count} 项未完成备注操作。客户端及远端状态仍需检查。')
+        except Exception as exc:self.operation_error(exc)
 
     def guided_trace(self):
         if self.trace_worker and self.trace_worker.isRunning():
@@ -301,8 +396,20 @@ class Window(QMainWindow):
             except Exception:
                 pass
         results=self.store.verify_all(lambda account,friend: observations.get(account,{}).get(friend))
+        remark_rows=self.store.remark_rows();remark_observations={}
+        for account,context in self.name_contexts.items():
+            friends=[r['friend'] for r in remark_rows if r['account']==account]
+            if not friends: continue
+            try: remark_observations[account]=read_remarks(context,friends)
+            except Exception: pass
+        for row in remark_rows:
+            current=remark_observations.get(row['account'],{}).get(row['friend'])
+            self.store.record_remark(row['account'],row['friend'],observed=current)
         self.expired=[(a,f) for a,f,state,scope in results if state==State.INVALID]
         self.status.setText(f'检查 {len(results)} 项配置，发现 {len(self.expired)} 项本地替换已失效。数据库一致也不能证明客户端显示一致。')
+        if remark_rows:
+            changed=sum(r['state']==State.INVALID for r in self.store.remark_rows())
+            self.status.setText(self.status.text()+f' 另有 {len(remark_rows)} 项本机备注试验，{changed} 项缓存变化，手机不变尚未验收。')
         self.render()
         if self.expired:
             box=QMessageBox(self)
@@ -317,10 +424,12 @@ class Window(QMainWindow):
             elif box.clickedButton()==details:
                 QMessageBox.information(self,'验证范围','检测比较当前头像库（包含稳定复制的 WAL）与已保存图片。不能证明客户端缓存显示，也不代表好友主动更新头像。')
 
-    def context(self):
+    def context(self, kind='avatar'):
+        if self.name_worker and self.name_worker.isRunning():
+            raise OfflineError('正在采集昵称，请先点击结束备注诊断')
         if self.trace_worker and self.trace_worker.isRunning():
             raise OfflineError('正在诊断，请先点击“结束诊断并复制报告”，避免其他操作干扰结果')
-        context=self.contexts.get(self.account)
+        context=(self.name_contexts if kind=='remark' else self.contexts).get(self.account)
         if context is None:
             raise OfflineError('请先登录微信并读取此账号联系人，以取得本次运行所需的内存密钥')
         if self.directory.text() and Path(self.directory.text()).resolve()!=context.account_root.parent.resolve():
@@ -330,6 +439,9 @@ class Window(QMainWindow):
         return context
 
     def confirm_write(self,text):
+        if self.name_worker and self.name_worker.isRunning():
+            self.status.setText('请先结束备注诊断，再执行其他写入。')
+            return False
         if self.trace_worker and self.trace_worker.isRunning():
             self.status.setText('请先结束诊断，再进行其他写入操作。')
             return False
@@ -350,7 +462,7 @@ class Window(QMainWindow):
                 raise OfflineError('此版本默认原始库写入尚未开放。请先运行新版兼容性检查，通过后选择“仅本次试验应用”。')
             if not self.confirm_write('将替换选定好友在本机头像库中的头像。'): return
             # Persist the selected image before any write so retry never needs upload.
-            self.store.save(self.account,c['username'],c['nick_name'] or '',self.avatars.get(c['username']),self.name.text().strip() or None,avatar)
+            self.store.save(self.account,c['username'],c['nick_name'] or '',self.avatars.get(c['username']),None,avatar)
             backup=self.offline.apply(context,c['username'],avatar,_candidate_trial=candidate_trial)
             self.store.record_applied(self.account,c['username'],backup)
             self.render()
@@ -373,7 +485,7 @@ class Window(QMainWindow):
                 QMessageBox.StandardButton.Cancel)!=QMessageBox.StandardButton.Ok: return
             if not _restore:
                 self.store.save(self.account,c['username'],c['nick_name'] or '',self.avatars.get(c['username']),
-                                self.name.text().strip() or None,self.pending_avatar)
+                                None,self.pending_avatar)
             report=self.offline.probe(context,c['username'],None if _restore else self.pending_avatar,_invalidate=_restore)
             text=json.dumps(report,ensure_ascii=False,indent=2)
             path=self.store.path.parent/('compatibility-'+uuid.uuid4().hex+'.json')
@@ -449,6 +561,10 @@ class Window(QMainWindow):
             self.store.clear_config(self.account,c['username']); self.render()
 
     def closeEvent(self, event):
+        if self.name_worker and self.name_worker.isRunning():
+            self.name_worker.stop()
+            self.status.setText('正在停止备注采集，报告复制后请再关闭。')
+            event.ignore(); return
         if self.trace_worker and self.trace_worker.isRunning():
             self.trace_worker.stop()
             self.status.setText('正在停止诊断，请稍后再关闭。报告将自动复制。')
