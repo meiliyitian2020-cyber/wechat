@@ -1,0 +1,47 @@
+# 验证记录
+
+2026-10-19。本次执行环境：Linux x86_64，无微信客户端、账号数据、Windows 或 Wine。
+用户确认有 Windows 测试机，但本环境没有该机器的远程执行能力。
+
+## 已执行
+
+`PYTHONPATH=/workspace/wechat/.deps:/workspace/wechat python -m pytest -q /workspace/wechat/tests`
+
+结果：11 passed，0 failed，0 skipped。
+
+覆盖：
+- 用户图片裁切为 128×128 PNG；持久保存 BLOB 与 SHA256；源文件删除、Store 重建后副本仍存在。
+- 不覆盖首次备份信息；相同好友 ID 的不同账号隔离；删除配置不影响其他账号。
+- 无成功应用记录时不会误报失效；字节一致不被声称为客户端有效；读取异常不泄露错误中的敏感值。
+- 写入和恢复明确拒绝。
+- 人工 SQLite 联系人数据查询；只读连接拒绝 DELETE；源数据库字节不变；排除聊天数据库。
+- 无显示器 Qt 界面初始化、已保存配置恢复和昵称/备注搜索。
+
+## 未执行／未通过验收
+
+- Windows 11 25H2 识别、版本资源读取与实际数据目录发现。
+- 微信 4.1.13.65 密钥获取、真实联系人与头像读取。
+- 真实客户端头像/昵称修改及其他设备影响验证。
+- 备份、加密写回、回滚、原头像恢复、失效弹窗与一键重应用（写后端尚未实现）。
+- Windows PyInstaller 构建、单文件 EXE 双击及退出进程检查。
+- GitHub Actions 工作流运行。
+
+这些均不是已通过项目；目前只读界面不是最终产品。
+
+## 第二轮验证结果（取代上述 11 项计数）
+
+安装固定版本依赖后，在独立 venv 执行：
+
+```
+/workspace/.venvs/wechat/bin/python -m pytest -q
+```
+
+结果：**26 passed，0 failed，0 skipped**。
+新增 9 项备份测试和 6 项真实 SQLCipher 引擎人工数据库测试。
+备份测试涵盖 DB/WAL/SHM、哈希、源文件变化、进程重启、符号链接、越界路径和清理。
+SQLCipher 实验涵盖加密暂存写入/解密读回、事务异常回滚、WAL 拒绝、逐页损坏、错误密钥和缺失好友。
+使用 SQLCipher 4.12.0 community，未使用任何真实微信数据。
+
+Windows 构建不安装此 Linux 研究依赖，因此该组实验在 Windows 测试中会显示为 skipped，
+不能将 Windows 其余测试通过解释为 SQLCipher Windows 写回能力已验证。
+此前列出的 Windows 和真实客户端未验证事项仍然全部有效。

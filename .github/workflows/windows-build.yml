@@ -1,0 +1,23 @@
+name: Windows read-only validation build
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - run: python -m pip install -r requirements.txt pytest==8.4.2 pyinstaller==6.16.0
+      - run: python -m pytest -q
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name WeChatLocalProfileEditor --add-data "third_party;third_party" main.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WeChatLocalProfileEditor-read-only-unverified
+          path: dist/WeChatLocalProfileEditor.exe

@@ -1,0 +1,61 @@
+# 代码调查与尚未验证的问题
+
+## 调查依据（2026-10-19）
+
+- WeChatMsg `14b466dcc4c60b43d9d79301e489c8d6029daed4`，MIT。
+  `wxManager/db_v4/head_image.py::set_avatar_buffer` 写 image_buffer/md5/update_time。
+  `wxManager/model/db_model.py::init_database` 使用普通 sqlite3.connect；不提供原始 SQLCipher 写回。
+  新插入分支的参数排列与列顺序也有疑点，不直接复用写入函数。
+  `contact.py::set_remark` 只更新所打开数据库的 remark，没有证明客户端使用或远端不被同步。
+- wechatauto-replica `d322c4a9b1124228820bab363e5676016f188fc6`，Apache-2.0。
+  `wechatauto/db.py` 用只读进程扫描获取候选密钥并验证第一页 HMAC，解密与合并 WAL 后只读查询快照。
+  文档包含 4.1.13.65 的 UIA 适配声明，但这不等于该版本联系人数据库读取已由本项目实测。
+  本项目不使用 UIA 唤醒补丁、发送、监听或后台线程。
+  上游允许退回旧快照或仅主库快照，因此不能把其返回值当成当前客户端实时显示证据。
+- wechat-local-viewer `de6a3f09fab43a02e786826b3085545dec9615f0`，MIT。
+  `backend/app/parsers/contact.py` 读取解密目录中的 SQLite 并展示联系人；不提供原版客户端修改后端。
+
+## 当前结论
+
+没有发现可以直接接入、同时满足退出微信、加密写回、崩溃恢复和客户端显示验证的成熟写入接口。
+这是“本次检查的代码不能证明可用”，并非“已证明技术上不可能”。
+普通 SQLite 文件不能覆盖加密 contact.db/head_image.db。未执行此类覆盖。
+修改缓存、更新 md5/time 或使用本地 remark 都尚未证明可以达到目标。
+昵称本地替换与头像替换是独立待验证问题，未调用官方备注接口。
+
+## 必须在受控 Windows 测试机解决的门槛
+
+1. 使用指定账号确认只读列表里的昵称、ID、头像与客户端测试好友相符。
+2. 判定头像缓存文件、head_image.db、contact.db 与进程内存的实际读取优先级。
+3. 确认 SQLCipher/WCDB 的密钥形态、页保留区、HMAC、salt、WAL 参数与安全事务兼容性。
+   仅第一页验证不能证明每页完整性或安全写回。
+4. 在测试数据副本上验证事务失败、文件锁、备份清单、WAL/SHM一致性和崩溃恢复；不得先改真实账号。
+5. 在可恢复测试账号、微信完全退出后才能测试目标记录变更；不能整体重建或覆盖聊天库。
+6. 重启原版客户端检查会话列表、聊天窗口、资料页，并确认消息收发及其他设备不受影响。
+7. 独立测试昵称同步行为；无证据前禁用。
+8. 通过实际缓存变化测试失效检测与重新应用，再允许有效状态和失效弹窗上线。
+
+在以上门槛通过之前，Writer 始终拒绝 apply/restore，last_applied 不会被本程序填写。
+当前校验器的“修改失效”分支仅用人工构造已应用记录测试，产品中不会凭空出现成功记录。
+数据库头像一致仍是“无法验证”，scope 明确描述局限，不声称客户端显示一致。
+
+## 第二轮开发：标准 SQLCipher 暂存写入实验
+
+已使用 sqlcipher3-binary 0.6.0 / SQLCipher 4.12.0 community 创建人工加密头像库。
+32 字节 raw key、4096 字节页、80 字节保留区下：
+
+- 上游第一页 HMAC 校验与标准 SQLCipher 产物兼容。
+- 暂存副本可通过 SQLCipher 事务更新单一好友的 image_buffer/md5/update_time。
+- 提交后每一页均通过 HMAC-SHA512 校验；SQLCipher integrity_check 为 ok。
+- 上游解密算法可读回提交后的头像，其他好友记录保留。
+- 提交前注入异常时事务回滚；真实源文件全程没有改变。
+- 非第一页损坏、错误密钥、未知目标好友和 WAL/SHM 存在时拒绝实验。
+
+模块 `editor/cipher_stage.py` **不会将暂存文件替换回微信目录**，也没有被 GUI 或 Writer 调用。
+48 字节 key+salt、明文头、非标准 WCDB 参数、WAL 合并均不在已支持范围内。
+标准格式实验不能代表微信真实数据库已适配，更不能代表真实客户端头像替换生效。
+后续需要 Windows 原生 SQLCipher 依赖与分发许可证检查、Windows 独占文件锁、
+真实 WCDB 副本兼容验证和客户端缓存研究，才能设计最终写回与崩溃恢复协议。
+
+新增 `editor/backup.py` 支持离线稳定副本及 WAL/SHM 存在状态、哈希和损坏检查。
+复制前后进程和哈希检查不能替代独占锁；目前不宣称能在与微信竞争时获得一致性写回。
