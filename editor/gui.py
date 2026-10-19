@@ -74,7 +74,7 @@ class Window(QMainWindow):
         right.addStretch()
         bottom = QHBoxLayout(); layout.addLayout(bottom)
         self.button(bottom, '重新检查配置', self.check)
-        self.button(bottom, '重新应用', self.apply)
+        self.button(bottom, '重新应用', lambda: self.reapply_expired() if self.expired else self.apply())
         self.button(bottom, '清除选中配置', self.clear)
         self.button(bottom, '恢复当前真实头像', self.restore)
         self.button(bottom, '故障恢复', self.recover)
@@ -232,7 +232,7 @@ class Window(QMainWindow):
             context=self.context()
             if not self.confirm_write('将替换选定好友在本机头像库中的头像。'): return
             # Persist the selected image before any write so retry never needs upload.
-            self.store.save(self.account,c['username'],c['nick_name'] or '',self.avatars.get(c['username']),None,avatar)
+            self.store.save(self.account,c['username'],c['nick_name'] or '',self.avatars.get(c['username']),self.name.text().strip() or None,avatar)
             backup=self.offline.apply(context,c['username'],avatar)
             self.store.record_applied(self.account,c['username'],backup)
             self.render()

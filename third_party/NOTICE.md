@@ -29,3 +29,10 @@ cryptography（Apache-2.0 或 BSD-3-Clause，底层库另有许可）、psutil�
 来源 https://github.com/coleifer/sqlcipher3 ，驱动许可证为 zlib/libpng，原文见 sqlcipher3-LICENSE。
 Windows wheel 已取得并检查，尚未执行；最新 Windows requirements 包含此依赖。
 驱动许可证不涵盖全部静态链接组件，发布 EXE 前仍需检查 SQLCipher/OpenSSL 的通知义务。
+
+实验版 EXE 的构建附带已安装运行依赖中的 LICENSE/NOTICE/COPYING 文件（tools/collect_licenses.py）。
+SQLCipher 许可文本摘自 sqlcipher3 0.6.4 源码发行包中的 vendor/sqlite3.c，见 SQLCipher-LICENSE。
+Windows sqlcipher3 wheel 内的版本字符串为 OpenSSL 3.6.0；附其官方 tag 的 LICENSE.txt。
+Qt/PySide 源码： https://code.qt.io/cgit/pyside/pyside-setup.git/tree/?h=v6.8.3 和
+https://download.qt.io/archive/qt/6.8/6.8.3/ 。提供完整应用源码与构建命令，允许修改和重新打包所用动态库；
+不得将应用分发条款理解为限制适用 LGPL 权利。Qt DLL 在 onefile 启动时解压并动态加载。

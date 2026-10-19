@@ -18,8 +18,21 @@ jobs:
       - run: python -m pytest -q
         env:
           QT_QPA_PLATFORM: offscreen
+      - run: python tools/collect_licenses.py
       - run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name WeChatLocalProfileEditor --collect-all sqlcipher3 --copy-metadata sqlcipher3 --add-data "third_party;third_party" main.py
+      - name: Test the frozen EXE against an artificial encrypted database
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath '.\dist\WeChatLocalProfileEditor.exe' -ArgumentList '--self-test', 'executable-selftest.json' -WorkingDirectory $pwd.Path -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw 'Frozen executable self-test failed' }
+          $report = Get-Content executable-selftest.json -Raw | ConvertFrom-Json
+          if (-not $report.ok) { throw 'Frozen executable reported failure' }
+          Get-Content executable-selftest.json
       - uses: actions/upload-artifact@v4
         with:
           name: WeChatLocalProfileEditor-experimental-unverified
-          path: dist/WeChatLocalProfileEditor.exe
+          path: |
+            dist/WeChatLocalProfileEditor.exe
+            executable-selftest.json
+            README.md
+            third_party/
