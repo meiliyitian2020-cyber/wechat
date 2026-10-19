@@ -158,3 +158,10 @@ WAL 文件头/滚动校验和/加密 HMAC/截断损坏拒绝、旧 epoch 尾部�
 EXE 自检也创建离线残留 WAL/SHM，实际使用 Windows 三文件独占句柄检查、写回、备份校验，再执行新版试验和界面自检。
 新增相同配置重复保存保留上次应用历史，避免重试副本检查丢失失效检测依据；探测失败也保留自定义头像配置。
 Windows 本轮结果需以新构建为准，真实微信显示仍未验证。
+
+WAL 修正版提交 c57dc96：Windows Actions run 39220564386 SUCCESS（1m44s）。
+Windows 测试包含主库/WAL/SHM 三文件独占处理；打包 EXE 实际完成残留日志副本合并、
+整组三文件备份、写回、单次检查凭据及恢复自检，并通过 Qt 界面启动退出检查。
+artifact 12171616801，约 59 MB：
+https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39220564386/artifacts/12171616801
+这些结果使用人工数据库，真实微信客户端显示效果仍需实测。
