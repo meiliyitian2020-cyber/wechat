@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QListWidgetItem, QFileDialog, QMessageBox, QScrollArea)
 from .core import Store, normalize_image, Writer, UnsupportedWrite, State
 from .reader import Session, auto_detect_db_dir, list_accounts
-from .windows import discover, WRITE_VERSIONS, READ_VERSIONS, VersionError
+from .windows import discover, WRITE_VERSIONS, READ_VERSIONS, VersionError, WechatRunningError, HELPER_PROCESSES, close_residual_helpers
 from .offline import OfflineAvatar, OfflineError
 from .compatibility import CompatibilityError
 from .cipher_stage import CipherError
@@ -223,7 +223,7 @@ class Window(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self,'无法保存',str(exc))
 
-    def remark_trial(self, restore=False):
+    def remark_trial(self, restore=False, _confirmed=False):
         if self.name_worker and self.name_worker.isRunning():
             self.name_worker.stop()
             self.remark_button.setEnabled(False)
@@ -243,7 +243,7 @@ class Window(QMainWindow):
             name=row['original_name'] if restore else self.name.text().strip()
             stage='validate_input'
             data=remark_payload(name,restore=restore)
-            if QMessageBox.question(self,'本机备注覆盖试验 · 不同步尚未验证',
+            if not _confirmed and QMessageBox.question(self,'本机备注覆盖试验 · 不同步尚未验证',
                 '请先用测试联系人验收：目标为电脑显示 B、手机保留 A。尚未验证手机备注绝不会变化。\n'
                 '本次只修改本机数据库 remark 缓存，保留原昵称、身份 ID、同步标志和其他记录；不调用官方备注功能。\n'
                 '请完全退出微信（含托盘），再点确定。工具会备份、校验并试写一次。\n'
@@ -274,9 +274,10 @@ class Window(QMainWindow):
             self.status.setText('本机备注缓存已试写，正在只读采集。请登录微信检查显示及手机，再点结束。')
             worker.start()
         except Exception as exc:
-            self.remark_error(exc,stage,context,self.remarks if backend_entered else None)
+            self.remark_error(exc,stage,context,self.remarks if backend_entered else None,
+                              retry=lambda:self.remark_trial(restore=restore,_confirmed=True))
 
-    def remark_error(self,exc,stage,context,service):
+    def remark_error(self,exc,stage,context,service,retry=None):
         report=remark_failure(exc,version=getattr(context,'detected_version',None),
                               gui_stage=stage,service=service)
         text=json.dumps(report,ensure_ascii=False,indent=2)
@@ -286,6 +287,8 @@ class Window(QMainWindow):
         outcome=report['source_write_outcome']
         if report['error_category']=='pending_previous_operation':
             result='本次未写入。发现此前未完成操作，请保持微信关闭，点击“备注故障恢复”。'
+        elif report['error_category']=='wechat_process_still_running':
+            result='进程检查未通过，本次未写入微信数据。主窗口关闭后，附属进程仍可能存在。'
         elif outcome in ('not_entered','not_started','not_written'):
             result='本次尚未写入微信数据；这个错误本身不代表微信仍在运行，也不代表需要故障恢复。'
         elif outcome=='rolled_back':
@@ -302,6 +305,12 @@ class Window(QMainWindow):
                 'exclusive_file_lock_failed':'无法取得目标文件独占权限',
                 'filesystem_permission_denied':'文件访问被拒绝',
                 'invalid_desktop_remark':'请输入 1 至 64 个字符，不含换行或控制字符',
+                'helper_identity_or_installation_mismatch':'组件身份或安装目录不匹配，未自动结束',
+                'process_identity_changed':'进程身份已变化，未继续处理',
+                'helper_termination_permission_denied':'无权结束组件，请确认工具与微信权限一致',
+                'helper_identity_unverifiable':'无权核实组件身份，未自动结束',
+                'process_list_changed':'微信进程名单已变化，请重新确认',
+                'helper_exit_timeout':'组件未在限时内退出，操作已停止',
                 'unclassified_error':'尚未分类的异常'}
         category=labels.get(report['error_category'],report['error_category'])
         box=QMessageBox(self)
@@ -310,9 +319,31 @@ class Window(QMainWindow):
         box.setText(f'{result}\n阶段：{stage} / {report["backend_stage"]}\n原因：{category}（{report["exception_type"]}）\n\n错误报告已自动复制，回到对话直接粘贴即可。')
         box.setDetailedText(text)
         copy=box.addButton('再次复制错误报告',QMessageBox.ButtonRole.ActionRole)
-        box.addButton('关闭',QMessageBox.ButtonRole.RejectRole)
+        close=box.addButton('关闭',QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(close);box.setEscapeButton(close)
+        cleanup=again=None
+        blockers=exc.blocking_processes if isinstance(exc,WechatRunningError) else ()
+        if blockers:
+            listing='\n'.join(f'{p.name}（PID {p.pid}）' for p in blockers[:16])
+            box.setText(box.text()+'\n\n检测到：\n'+listing)
+            if retry and report['source_write_outcome'] in ('not_entered','not_started','not_written'):
+                again=box.addButton('重新检查并重试',QMessageBox.ButtonRole.ActionRole)
+                if len(blockers)<=16 and all(p.name in HELPER_PROCESSES and p.created is not None for p in blockers):
+                    cleanup=box.addButton('结束残留组件并重试',QMessageBox.ButtonRole.DestructiveRole)
+                    box.setText(box.text()+'\n\n仅检测到附属组件。选择“结束残留组件并重试”会强制结束列出的组件，未保存的小程序或网页内容可能丢失。不会强制结束微信主程序；仅处理本次安装目录内的组件。')
+        box.setDefaultButton(close);box.setEscapeButton(close)
         box.exec()
-        if box.clickedButton()==copy:QApplication.clipboard().setText(text)
+        clicked=box.clickedButton()
+        if clicked==copy:QApplication.clipboard().setText(text)
+        elif cleanup is not None and clicked==cleanup:
+            try:
+                close_residual_helpers(blockers,context.executable.parent)
+            except Exception as cleanup_error:
+                self.remark_error(cleanup_error,'close_residual_helpers',context,None,retry=retry)
+                return
+            retry()
+        elif again is not None and clicked==again:
+            retry()
 
     def remark_finished(self):
         worker=self.name_worker;self.name_worker=None

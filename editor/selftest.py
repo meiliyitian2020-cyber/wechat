@@ -155,6 +155,19 @@ def run(output):
             if remark_source.read_bytes()!=original or failure['backend_stage']!='probe_process_check':
                 raise RuntimeError('failure stage or source snapshot mismatch')
             report['stages'].append('packaged_redacted_error_reports_and_precise_source_outcomes')
+            from .windows import BlockingProcess, WechatRunningError, close_residual_helpers
+            from .errors import safe_error
+            blocked=WechatRunningError([BlockingProcess(123,'wechatappex.exe',1.5)])
+            safe=safe_error(blocked)
+            if safe.get('blocking_processes')!=[{'name':'wechatappex.exe','pid':123,'role':'helper'}]:
+                raise RuntimeError('process report mismatch')
+            try:
+                close_residual_helpers([BlockingProcess(123,'weixin.exe',1.5)],root)
+                raise AssertionError('main process was accepted for termination')
+            except Exception as exc:
+                from .windows import VersionError
+                if not isinstance(exc,VersionError): raise
+            report['stages'].append('packaged_process_report_and_main_process_termination_refusal')
         report['ok']=True;code=0
     except Exception as exc:
         report['error_type']=type(exc).__name__

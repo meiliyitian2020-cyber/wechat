@@ -178,3 +178,68 @@ def test_remark_error_after_verified_write_does_not_claim_source_untouched(tmp_p
     assert report['source_unchanged_by_this_operation'] is False
     assert 'private-store-path' not in json.dumps(report)
     assert w.close()
+
+
+def test_helper_cleanup_requires_explicit_choice_then_retries_without_bypassing_probe(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QMessageBox
+    from editor.windows import WechatRunningError, BlockingProcess
+    from editor.trace import LoginTrace
+    monkeypatch.setattr('editor.gui.discover',lambda:(_ for _ in ()).throw(RuntimeError('synthetic')))
+    questions=[]
+    monkeypatch.setattr(QMessageBox,'question',lambda *args:(questions.append(True) or QMessageBox.StandardButton.Ok))
+    monkeypatch.setattr(QMessageBox,'information',lambda *args:QMessageBox.StandardButton.Ok)
+    chosen=[]
+    def choose(self):
+        assert self.defaultButton().text()=='关闭'
+        chosen.append(next(b for b in self.buttons() if b.text()=='结束残留组件并重试'))
+        assert '未保存' in self.text()
+        return 0
+    monkeypatch.setattr(QMessageBox,'exec',choose)
+    monkeypatch.setattr(QMessageBox,'clickedButton',lambda self:chosen[-1])
+    app=QApplication.instance() or QApplication([])
+    w=Window(Store(tmp_path));w.loaded(('a',[{'username':'f','nick_name':'CCCCC','remark':'A'}],{}))
+    w.items.setCurrentRow(0);w.name.setText('B')
+    context=SimpleNamespace(detected_version='4.1.15.56',executable=tmp_path/'installation'/'Weixin.exe')
+    monkeypatch.setattr(w,'context',lambda *args:context)
+    calls=[]
+    def probe(*args):
+        calls.append('probe');w.remarks.last_write_outcome='not_written'
+        if calls==['probe']:raise WechatRunningError([BlockingProcess(123,'wechatappex.exe',1.5)])
+    monkeypatch.setattr(w.remarks,'probe',probe)
+    def cleaned(approved,installation):
+        assert approved[0].pid==123 and installation==context.executable.parent
+        calls.append('cleanup')
+    monkeypatch.setattr('editor.gui.close_residual_helpers',cleaned)
+    monkeypatch.setattr(w.remarks,'original_name',lambda *args:'A')
+    monkeypatch.setattr(w.remarks,'apply',lambda *args,**kwargs:calls.append('apply'))
+    current={'name':'B','nickname':'CCCCC','local_type':1}
+    monkeypatch.setattr('editor.gui.read_remark',lambda *args:current)
+    monkeypatch.setattr('editor.gui.wechat_running',lambda:False)
+    monkeypatch.setattr('editor.gui.LoginTrace',lambda c,f,t,**kwargs:LoginTrace(
+        c,f,t,reader=lambda *args:current,process=lambda:False,interval=.01,duration=.05))
+    w.remark_trial()
+    assert calls==['probe','cleanup','probe','apply']
+    assert len(questions)==1
+    assert w.name_worker.wait(1000);app.processEvents()
+    assert w.close()
+
+
+def test_main_process_never_offers_forced_cleanup(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QMessageBox
+    from editor.windows import WechatRunningError, BlockingProcess
+    monkeypatch.setattr('editor.gui.discover',lambda:(_ for _ in ()).throw(RuntimeError('synthetic')))
+    chosen=[]
+    def close(self):
+        assert not any(b.text()=='结束残留组件并重试' for b in self.buttons())
+        assert self.defaultButton().text()=='关闭'
+        chosen.append(self.defaultButton());return 0
+    monkeypatch.setattr(QMessageBox,'exec',close)
+    monkeypatch.setattr(QMessageBox,'clickedButton',lambda self:chosen[-1])
+    app=QApplication.instance() or QApplication([])
+    w=Window(Store(tmp_path))
+    error=WechatRunningError([BlockingProcess(123,'weixin.exe',1.5),BlockingProcess(124,'wechatappex.exe',1.5)])
+    w.remark_error(error,'copy_probe',SimpleNamespace(detected_version='4.1.15.56'),None,
+                   retry=lambda:(_ for _ in ()).throw(AssertionError('retry without user choice')))
+    assert w.close()

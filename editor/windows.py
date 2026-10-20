@@ -1,4 +1,6 @@
 import os
+import time
+from dataclasses import dataclass
 from pathlib import Path
 import psutil
 
@@ -68,17 +70,89 @@ def discover():
     check_read_version(ver)
     return path, ver
 
-def ensure_wechat_stopped():
-    """Fail closed; do not terminate the user's WeChat process."""
-    if os.name != 'nt':
-        raise VersionError('无法在非 Windows 系统确认微信已退出')
+MAIN_PROCESSES = frozenset({'weixin.exe','wechat.exe'})
+HELPER_PROCESSES = frozenset({'wechatappex.exe','weixinappex.exe'})
+
+@dataclass(frozen=True)
+class BlockingProcess:
+    pid: int
+    name: str
+    created: float | None
+
+class WechatRunningError(VersionError):
+    def __init__(self, blockers):
+        super().__init__('请先完全退出微信后再继续（含残留组件）')
+        self.blocking_processes=tuple(blockers)
+
+
+def _require_windows():
+    if os.name!='nt': raise VersionError('无法在非 Windows 系统确认微信已退出')
+
+
+def blocking_processes():
+    _require_windows()
+    blockers=[]
     try:
         for process in psutil.process_iter():
             try:
-                name = process.name()
+                name=process.name().lower()
+                if name not in MAIN_PROCESSES|HELPER_PROCESSES: continue
+                try: created=process.create_time()
+                except psutil.AccessDenied: created=None
+                blockers.append(BlockingProcess(process.pid,name,created))
             except psutil.NoSuchProcess:
                 continue
-            if name.lower() in {'weixin.exe', 'wechat.exe', 'wechatappex.exe', 'weixinappex.exe'}:
-                raise VersionError('请先完全退出微信后再继续')
     except psutil.AccessDenied:
         raise VersionError('无法确认微信进程状态，已禁止操作') from None
+    return blockers
+
+
+def ensure_wechat_stopped():
+    blockers=blocking_processes()
+    if blockers: raise WechatRunningError(blockers)
+
+
+def close_residual_helpers(approved, installation):
+    """Only called after explicit UI approval; never terminate a main process."""
+    _require_windows()
+    approved=tuple(approved)
+    if len(approved)>16: raise VersionError('残留组件过多，不自动结束，请先正常退出相关应用')
+    if not approved or any(p.name not in HELPER_PROCESSES or p.created is None for p in approved):
+        raise VersionError('不能自动结束主程序或身份无法确认的进程')
+    root=Path(installation).resolve(strict=True)
+    current=blocking_processes()
+    if any(p.name in MAIN_PROCESSES for p in current): raise WechatRunningError(current)
+    allowed={(p.pid,p.name,p.created) for p in approved}
+    if any((p.pid,p.name,p.created) not in allowed for p in current):
+        raise VersionError('检测到新的微信进程，请重新确认名单')
+    # Validate every survivor before terminating any of them.
+    targets=[]
+    for item in current:
+        try:
+            process=psutil.Process(item.pid)
+            executable=Path(process.exe()).resolve(strict=True)
+            if (process.name().lower()!=item.name or process.create_time()!=item.created or
+                executable.name.lower()!=item.name or not executable.is_relative_to(root)):
+                raise VersionError('残留组件身份或安装目录不匹配，未自动结束')
+            targets.append((process,item))
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.AccessDenied:
+            raise VersionError('无权核实残留组件，未自动结束') from None
+    deadline=time.monotonic()+5
+    for process,item in targets:
+        observed=blocking_processes()
+        if any(p.name in MAIN_PROCESSES for p in observed):
+            raise WechatRunningError(observed)
+        try:
+            if process.name().lower()!=item.name or process.create_time()!=item.created:
+                raise VersionError('进程身份已变化，停止处理残留组件')
+            process.terminate()
+            process.wait(timeout=max(.01,deadline-time.monotonic()))
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.AccessDenied:
+            raise VersionError('无权结束残留组件，请使用相同权限运行工具') from None
+        except psutil.TimeoutExpired:
+            raise VersionError('残留组件未在限时内退出，已停止操作') from None
+    ensure_wechat_stopped()
