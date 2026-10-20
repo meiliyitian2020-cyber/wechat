@@ -313,3 +313,10 @@ TEXT/BLOB 分开标记，所有字段及其他表继续校验；目标整行也�
 异常后的解码器恢复、匿名表上下文脱敏。真实用户异常是否属于此类仍待新构建验证。
 打包自检也加入目标与其他表的非 UTF-8 TEXT，校验写回后 SQLite 类型和字节不变。
 错误分类新增文本解码、未知函数和结构错误；不输出原始错误消息或个人信息。
+
+原始字节兼容版 2237564：Linux 149 passed、2 skipped；Windows Actions run 39358737025
+SUCCESS（1m32s），通过 Windows 测试、单文件打包与实际 EXE 人工加密数据自检，
+包括非 UTF-8 TEXT 的字节/类型保留及本机备注 A→B→A。未访问真实微信账号。
+artifact 12236781111（WeChatLocalProfileEditor-Raw-Text-Compatibility）：
+https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39358737025/artifacts/12236781111
+本次用户真实库的异常根因、客户端备注显示及手机备注不变仍待用户测试，不能从人工数据推断通过。
