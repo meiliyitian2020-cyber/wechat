@@ -76,7 +76,7 @@ def run(output):
             report['stages'].append('invalidation')
             # Exercise the bundled Qt platform plugins without discovering real accounts.
             os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
-            from PySide6.QtWidgets import QApplication
+            from PySide6.QtWidgets import QApplication, QPushButton
             from .core import Store
             from . import gui
             def synthetic_discover(): raise RuntimeError('人工数据打包自检')
@@ -84,8 +84,13 @@ def run(output):
             app=QApplication.instance() or QApplication([])
             window=gui.Window(Store(Path(temp)/'gui-state'))
             window.show();app.processEvents()
-            if not window.name.isEnabled() or '待验收' not in window.name.placeholderText():
-                raise RuntimeError('experimental remark editor missing scope warning')
+            if not window.name.isEnabled() or window.remark_button.text()!='应用电脑备注':
+                raise RuntimeError('release remark editor missing')
+            labels=[button.text() for button in window.findChildren(QPushButton) if button.isVisible()]
+            if any('诊断' in label or '试验' in label or '兼容性' in label for label in labels):
+                raise RuntimeError('diagnostic controls exposed in release interface')
+            if window.name_worker is not None or window.trace_worker is not None:
+                raise RuntimeError('release interface started diagnostic worker')
             if not window.close(): raise RuntimeError('window did not close')
             app.processEvents()
             report['stages'].append('packaged_qt_gui_startup_and_shutdown')
