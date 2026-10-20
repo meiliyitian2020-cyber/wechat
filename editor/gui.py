@@ -300,6 +300,8 @@ class Window(QMainWindow):
         labels={'unsupported_sqlite_tokenizer':'联系人库使用当前引擎不支持的分词器',
                 'unsupported_sqlite_collation':'联系人库使用当前引擎不支持的排序规则',
                 'unsupported_sqlite_module':'联系人库使用当前引擎不支持的扩展表',
+                'unsupported_sqlite_function':'联系人库使用当前引擎不支持的函数',
+                'sqlite_text_decode_error':'联系人字段无法按预期文本编码读取',
                 'wechat_process_still_running':'检测到微信相关进程',
                 'wechat_process_status_unknown':'无法核实微信进程状态',
                 'exclusive_file_lock_failed':'无法取得目标文件独占权限',

@@ -115,6 +115,11 @@ def run(output):
                 db.execute('INSERT INTO contact VALUES(?,?,?,?,?)',('synthetic-contact','CCCCC','A',1,917))
                 db.execute('CREATE TABLE synthetic_sync_queue(id INTEGER,payload BLOB)')
                 db.execute('INSERT INTO synthetic_sync_queue VALUES(1,?)',(b'unchanged',))
+                db.execute('ALTER TABLE contact ADD COLUMN opaque_text TEXT')
+                db.execute('ALTER TABLE synthetic_sync_queue ADD COLUMN opaque_text TEXT')
+                opaque_text=b'\x80\xff\x00synthetic-opaque-text'
+                db.execute('UPDATE contact SET opaque_text=CAST(? AS TEXT)',(opaque_text,))
+                db.execute('UPDATE synthetic_sync_queue SET opaque_text=CAST(? AS TEXT)',(opaque_text,))
                 db.commit()
             remark_context=Context(remark_source,root,root.name,context.executable,remark_key,'4.1.15.56')
             remark_service=OfflineRemark(Path(temp)/'remark-backups',_guard=lambda:None,
@@ -130,13 +135,17 @@ def run(output):
             with closing(open_cipher(remark_source,remark_key)) as db:
                 if db.execute('SELECT flag FROM contact').fetchone()[0]!=917:
                     raise RuntimeError('remark trial modified flags')
-                if db.execute('SELECT * FROM synthetic_sync_queue').fetchall()!=[(1,b'unchanged')]:
+                if db.execute('SELECT id,payload FROM synthetic_sync_queue').fetchall()!=[(1,b'unchanged')]:
                     raise RuntimeError('remark trial modified other tables')
+                for table in ('contact','synthetic_sync_queue'):
+                    if db.execute('SELECT typeof(opaque_text),hex(opaque_text) FROM '+table).fetchone()!=('text',opaque_text.hex().upper()):
+                        raise RuntimeError('opaque text bytes or SQLite type changed')
             remark_service.probe(remark_context,'synthetic-contact',payload('A'))
             remark_service.apply(remark_context,'synthetic-contact',payload('A'),_candidate_trial=True)
             if read_remark(remark_context,'synthetic-contact',_validate=lambda c:None)['name']!='A':
                 raise RuntimeError('remark restore mismatch')
             report['stages'].append('packaged_synthetic_desktop_remark_A_B_A_and_protected_fields')
+            report['stages'].append('packaged_invalid_utf8_text_preserved_with_sqlite_types')
             from .errors import remark_failure
             failure=remark_failure(RuntimeError('synthetic-private-message'),
                                    version='4.1.15.56',gui_stage='save_write_history',service=remark_service)

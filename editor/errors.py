@@ -20,6 +20,12 @@ def safe_error(exc):
               ('unknown tokenizer', 'unsupported_sqlite_tokenizer'),
               ('no such collation', 'unsupported_sqlite_collation'),
               ('no such module', 'unsupported_sqlite_module'),
+              ('no such function', 'unsupported_sqlite_function'),
+              ('could not decode to utf-8', 'sqlite_text_decode_error'),
+              ('could not decode to utf8', 'sqlite_text_decode_error'),
+              ('malformed database schema', 'sqlite_schema_error'),
+              ('no such table', 'sqlite_table_missing'),
+              ('no such column', 'sqlite_column_missing'),
               ('database disk image is malformed', 'database_integrity_failed'),
               ('database is locked', 'database_locked'),
               ('database is busy', 'database_locked'),
@@ -27,7 +33,8 @@ def safe_error(exc):
               ('disk is full', 'disk_full'))
     category=next((code for phrase,code in patterns if phrase in message),None)
     if category is None:
-        if isinstance(exc,PermissionError): category='filesystem_permission_denied'
+        if isinstance(exc,UnicodeError): category='sqlite_text_decode_error'
+        elif isinstance(exc,PermissionError): category='filesystem_permission_denied'
         elif isinstance(exc,FileNotFoundError): category='file_not_found'
         elif isinstance(exc,OSError): category='filesystem_error'
         else: category='unclassified_error'
@@ -57,6 +64,18 @@ def remark_failure(exc, *, version=None, gui_stage, service=None):
     if gui_stage=='close_residual_helpers':
         report['source_unchanged_by_this_operation']=None
         report['source_state_requires_fresh_probe']=True
+    context=getattr(service,'digest_context',None) if service else None
+    if isinstance(context,dict):
+        allowed={}
+        for key in ('table_ordinal','column_count'):
+            value=context.get(key)
+            if type(value) is int and 0<=value<1000000:allowed[key]=value
+        for key in ('table_is_contact','table_is_virtual'):
+            value=context.get(key)
+            if type(value) is bool:allowed[key]=value
+        if context.get('query_stage') in ('table_list','table_metadata','row_read'):
+            allowed['query_stage']=context['query_stage']
+        if allowed:report['table_check_context']=allowed
     underlying=getattr(service,'last_failure',None) if service else None
     if underlying:report['underlying_error']=underlying
     return report

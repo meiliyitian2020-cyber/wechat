@@ -177,3 +177,51 @@ def test_real_unsupported_contact_extension_reports_safe_stage_and_never_writes(
     assert report['source_unchanged_by_this_operation'] is True
     assert report['backend_stage'] in ('probe_cipher_copy', 'remark_other_tables_digest_before')
     assert 'private_missing' not in json.dumps(report)
+
+
+def test_invalid_utf8_text_is_preserved_in_target_and_other_tables(fixture):
+    context,service=fixture
+    raw=b'\x80\xff\x00private-stored-text'
+    with closing(open_cipher(context.source,context.key)) as db:
+        db.execute('ALTER TABLE contact ADD COLUMN opaque_text TEXT')
+        db.execute('UPDATE contact SET opaque_text=CAST(? AS TEXT) WHERE username=?',(raw,'friend'))
+        db.execute('UPDATE sync_queue SET payload=CAST(? AS TEXT)',(raw,));db.commit()
+        with pytest.raises(Exception) as legacy_failure:
+            db.execute('SELECT payload FROM sync_queue').fetchall()
+        assert 'decode' in str(legacy_failure.value).lower()
+        before_target=db.execute('SELECT typeof(opaque_text),hex(opaque_text) FROM contact WHERE username=?',('friend',)).fetchone()
+        before_queue=db.execute('SELECT typeof(payload),hex(payload) FROM sync_queue').fetchall()
+    before=files(context)
+    report=service.probe(context,'friend',payload('电脑B'))
+    assert files(context)==before
+    assert report['target_non_remark_fields_unchanged'] is True
+    service.apply(context,'friend',payload('电脑B'),_candidate_trial=True)
+    with closing(open_cipher(context.source,context.key)) as db:
+        assert db.execute('SELECT nick_name,remark FROM contact WHERE username=?',('friend',)).fetchone()==('CCCCC','电脑B')
+        assert db.execute('SELECT typeof(opaque_text),hex(opaque_text) FROM contact WHERE username=?',('friend',)).fetchone()==before_target
+        assert db.execute('SELECT typeof(payload),hex(payload) FROM sync_queue').fetchall()==before_queue
+
+
+def test_raw_digest_distinguishes_text_from_blob_and_restores_decoder(fixture):
+    from editor.local_remark import protected_digest
+    context,service=fixture
+    with closing(open_cipher(context.source,context.key)) as db:
+        db.execute('UPDATE sync_queue SET payload=?',(b'same-bytes',));db.commit()
+        first=protected_digest(db,'friend')
+        assert db.text_factory is str
+        db.execute('UPDATE sync_queue SET payload=CAST(payload AS TEXT)');db.commit()
+        second=protected_digest(db,'friend')
+        assert first!=second
+        assert db.text_factory is str
+        assert db.execute('SELECT payload FROM sync_queue').fetchone()[0]=='same-bytes'
+
+
+def test_raw_reader_restores_decoder_after_missing_extension(fixture):
+    from editor.local_remark import raw_rows
+    context,service=fixture
+    with closing(open_cipher(context.source,context.key)) as db:
+        with pytest.raises(Exception):
+            with raw_rows(db,'nonexistent_table'):
+                raise AssertionError('missing table must not be skipped')
+        assert db.text_factory is str
+        assert db.execute('SELECT remark FROM contact WHERE username=?',('friend',)).fetchone()[0]=='A'

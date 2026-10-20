@@ -301,3 +301,15 @@ SUCCESS（1m35s），通过 Windows 测试、单文件打包和实际 EXE 人工
 artifact 12235582893（WeChatLocalProfileEditor-Residual-Process-Handler）：
 https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39356749770/artifacts/12235582893
 用户当前拦截进程的具体名单、实际附属组件退出效果与备注远端不同步仍待实测。
+
+## 用户已通过进程守卫，失败于其他表摘要
+实际报告：copy_probe / remark_other_tables_digest_before / OperationalError / unclassified_error，
+not_written 且 source_write_started=false。表明当次进程检查通过；不能据此确认具体 SQLite 错误。
+已重现旧算法的独立兼容性缺陷：合法 SQLite TEXT 中包含非 UTF-8 字节时，Python 默认解码整行失败。
+改用 typeof + 原始值的类型化查询，在读取期间临时 text_factory=bytes，并始终恢复原工厂。
+TEXT/BLOB 分开标记，所有字段及其他表继续校验；目标整行也比较 SQLite 类型和原始字节，只允许 remark 改变。
+为避免隐式数据库编码转换，备注试验仅接受 UTF-8 编码的数据库；选定的备注本身仍必须是可解码文字。
+新增测试覆盖非目标表和目标未知 TEXT 字段含非法 UTF-8/NUL 的保留、相同字节的 TEXT/BLOB 摘要区分、
+异常后的解码器恢复、匿名表上下文脱敏。真实用户异常是否属于此类仍待新构建验证。
+打包自检也加入目标与其他表的非 UTF-8 TEXT，校验写回后 SQLite 类型和字节不变。
+错误分类新增文本解码、未知函数和结构错误；不输出原始错误消息或个人信息。

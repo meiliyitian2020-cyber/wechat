@@ -26,3 +26,14 @@ def test_source_state_is_not_misrepresented_after_success_or_rollback(outcome,st
     report=remark_failure(RuntimeError('private'),version='4.1.15.56',gui_stage='save_write_history',service=service)
     assert report['source_write_started'] is started
     assert report['source_unchanged_by_this_operation'] is unchanged
+
+
+def test_failed_table_context_exports_only_anonymous_fields():
+    service=SimpleNamespace(last_write_outcome='not_written',last_stage='remark_other_tables_digest_before',
+                            last_failure=None,digest_context=dict(table_ordinal=7,column_count=15,
+                                table_is_contact=False,table_is_virtual=True,query_stage='row_read',
+                                table_name='private-table',private_path='private-path'))
+    report=remark_failure(RuntimeError('private-data'),version='4.1.15.56',gui_stage='copy_probe',service=service)
+    assert report['table_check_context']==dict(table_ordinal=7,column_count=15,
+                                            table_is_contact=False,table_is_virtual=True,query_stage='row_read')
+    assert 'private-' not in json.dumps(report)
