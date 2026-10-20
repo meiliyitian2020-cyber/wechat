@@ -122,3 +122,59 @@ def test_desktop_remark_a_b_flow_reuses_config_and_preserves_avatar(tmp_path, mo
     w.select()
     assert w.name.text()=='B'
     assert w.close()
+
+
+def test_remark_probe_error_copies_redacted_report_without_blame_or_recovery_claim(tmp_path,monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr('editor.gui.discover',lambda:(_ for _ in ()).throw(RuntimeError('synthetic')))
+    monkeypatch.setattr(QMessageBox,'question',lambda *args:QMessageBox.StandardButton.Ok)
+    monkeypatch.setattr(QMessageBox,'exec',lambda *args:0)
+    app=QApplication.instance() or QApplication([])
+    w=Window(Store(tmp_path));w.loaded(('a',[{'username':'f','nick_name':'CCCCC','remark':'A'}],{}))
+    w.items.setCurrentRow(0);w.name.setText('B')
+    monkeypatch.setattr(w,'context',lambda *args:SimpleNamespace(detected_version='4.1.15.56'))
+    def fail(*args):
+        w.remarks.phase('remark_other_tables_digest_before')
+        w.remarks.last_write_outcome='not_written'
+        raise RuntimeError('no such tokenizer: private-name private-key private-path')
+    monkeypatch.setattr(w.remarks,'probe',fail)
+    monkeypatch.setattr(w,'operation_error',lambda *args:(_ for _ in ()).throw(AssertionError('generic error dialog used')))
+    w.remark_trial()
+    report=json.loads(app.clipboard().text())
+    assert report['operation']=='desktop_remark_failure'
+    assert report['gui_stage']=='copy_probe'
+    assert report['error_category']=='unsupported_sqlite_tokenizer'
+    assert report['source_write_started'] is False
+    assert report['source_unchanged_by_this_operation'] is True
+    assert 'private-' not in json.dumps(report)
+    assert (tmp_path/'desktop-remark-error.json').exists()
+    assert w.close()
+
+
+def test_remark_error_after_verified_write_does_not_claim_source_untouched(tmp_path,monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr('editor.gui.discover',lambda:(_ for _ in ()).throw(RuntimeError('synthetic')))
+    monkeypatch.setattr(QMessageBox,'question',lambda *args:QMessageBox.StandardButton.Ok)
+    monkeypatch.setattr(QMessageBox,'exec',lambda *args:0)
+    app=QApplication.instance() or QApplication([])
+    w=Window(Store(tmp_path));w.loaded(('a',[{'username':'f','nick_name':'CCCCC','remark':'A'}],{}))
+    w.items.setCurrentRow(0);w.name.setText('B')
+    monkeypatch.setattr(w,'context',lambda *args:SimpleNamespace(detected_version='4.1.15.56'))
+    monkeypatch.setattr(w.remarks,'probe',lambda *args:None)
+    monkeypatch.setattr(w.remarks,'original_name',lambda *args:'A')
+    def applied(*args,**kwargs):
+        w.remarks.last_write_outcome='written_verified';w.remarks.phase('apply_complete')
+    monkeypatch.setattr(w.remarks,'apply',applied)
+    monkeypatch.setattr(w.store,'record_remark',lambda *args,**kwargs:(_ for _ in ()).throw(OSError('private-store-path')))
+    w.remark_trial()
+    report=json.loads(app.clipboard().text())
+    assert report['gui_stage']=='save_write_history'
+    assert report['source_write_outcome']=='written_verified'
+    assert report['source_write_started'] is True
+    assert report['source_unchanged_by_this_operation'] is False
+    assert 'private-store-path' not in json.dumps(report)
+    assert w.close()

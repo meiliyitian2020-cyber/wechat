@@ -144,3 +144,36 @@ def test_report_never_contains_actual_remarks_nicknames_or_identity():
 @pytest.mark.parametrize('name',['','x'*65,'x\n','x\x00'])
 def test_bad_names_are_rejected(name):
     with pytest.raises(OfflineError):payload(name)
+
+
+@pytest.mark.parametrize('feature', ['tokenizer', 'module', 'collation'])
+def test_real_unsupported_contact_extension_reports_safe_stage_and_never_writes(fixture, feature):
+    from editor.errors import remark_failure
+    context, service = fixture
+    with closing(open_cipher(context.source, context.key)) as db:
+        if feature == 'collation':
+            db.execute('CREATE INDEX contact_remark_index ON contact(remark COLLATE NOCASE)')
+            db.execute('PRAGMA writable_schema=ON')
+            db.execute("UPDATE sqlite_master SET sql=replace(sql,'NOCASE','private_missing_collation') WHERE name='contact_remark_index'")
+        else:
+            if feature == 'tokenizer':
+                db.execute("CREATE VIRTUAL TABLE contact_search USING fts4(text,tokenize=unicode61)")
+            else:
+                db.execute("CREATE VIRTUAL TABLE contact_search USING fts5(text,tokenize='unicode61')")
+            db.execute('PRAGMA writable_schema=ON')
+            if feature == 'tokenizer':
+                db.execute("UPDATE sqlite_master SET sql=replace(sql,'unicode61','private_missing_tokenizer') WHERE name='contact_search'")
+            else:
+                db.execute("UPDATE sqlite_master SET sql=replace(sql,'USING fts5','USING private_missing_module') WHERE name='contact_search'")
+        db.execute('PRAGMA writable_schema=OFF');db.commit()
+    before = files(context)
+    with pytest.raises(Exception) as failure:
+        service.probe(context, 'friend', payload('B'))
+    assert files(context) == before
+    report = remark_failure(failure.value, version=context.detected_version, gui_stage='copy_probe', service=service)
+    assert report['error_category'] == 'unsupported_sqlite_' + feature
+    assert report['source_write_outcome'] == 'not_written'
+    assert report['source_write_started'] is False
+    assert report['source_unchanged_by_this_operation'] is True
+    assert report['backend_stage'] in ('probe_cipher_copy', 'remark_other_tables_digest_before')
+    assert 'private_missing' not in json.dumps(report)

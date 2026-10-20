@@ -98,9 +98,12 @@ class OfflineRemark(OfflineAvatar):
         if invalidate: raise OfflineError('禁止删除联系人记录')
         name = decode(data)
         with closing(open_cipher(path, key)) as db:
+            self.phase('remark_schema')
             metadata = schema(db)
+            self.phase('remark_other_tables_digest_before')
             before = protected_digest(db, friend)
             db.execute('PRAGMA foreign_keys=ON')
+            self.phase('remark_target_update_in_copy')
             with db:
                 db.execute('BEGIN IMMEDIATE')
                 cursor = db.execute('SELECT * FROM contact WHERE username=?', (friend,))
@@ -114,12 +117,17 @@ class OfflineRemark(OfflineAvatar):
                 self._last_original = original['remark']
                 expected = list(rows[0]); expected[columns.index('remark')] = name
                 db.execute('UPDATE contact SET remark=? WHERE username=?', (name, friend))
+            self.phase('remark_checkpoint_copy')
             checkpoint_copy(db)
+        self.phase('remark_page_hmac')
         verify_pages(path, key)
         with closing(open_cipher(path, key)) as db:
+            self.phase('remark_target_readback')
             if db.execute('SELECT * FROM contact WHERE username=?', (friend,)).fetchall() != [tuple(expected)]:
                 raise OfflineError('电脑备注目标记录校验失败')
+            self.phase('remark_other_tables_digest_after')
             if protected_digest(db, friend) != before: raise OfflineError('电脑备注试验影响了其他联系人或数据表')
+            self.phase('remark_foreign_key_check')
             if schema(db) != metadata or db.execute('PRAGMA foreign_key_check').fetchall():
                 raise OfflineError('联系人结构或关联校验失败')
             engine = db.execute('PRAGMA cipher_version').fetchone()[0]

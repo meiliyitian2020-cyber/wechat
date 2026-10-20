@@ -13,6 +13,7 @@ from .offline import OfflineAvatar, OfflineError
 from .compatibility import CompatibilityError
 from .cipher_stage import CipherError
 from .diagnostics import login_report
+from .errors import remark_failure
 from .observe import read_current, read_details
 from .trace import LoginTrace, Timeline, RemarkTimeline, wechat_running
 from .local_remark import OfflineRemark, payload as remark_payload
@@ -233,11 +234,14 @@ class Window(QMainWindow):
         if not c.get('remark'):
             QMessageBox.information(self,'没有原备注','请选择已经设置手机备注的测试好友。')
             return
-        row=next((r for r in self.store.remark_rows() if (r['account'],r['friend'])==(self.account,c['username'])),None)
+        context=None;stage='configuration';backend_entered=False
         try:
+            row=next((r for r in self.store.remark_rows() if (r['account'],r['friend'])==(self.account,c['username'])),None)
+            stage='select_context'
             context=self.context('remark')
             if restore and row is None: raise OfflineError('没有保存的原备注缓存')
             name=row['original_name'] if restore else self.name.text().strip()
+            stage='validate_input'
             data=remark_payload(name,restore=restore)
             if QMessageBox.question(self,'本机备注覆盖试验 · 不同步尚未验证',
                 '请先用测试联系人验收：目标为电脑显示 B、手机保留 A。尚未验证手机备注绝不会变化。\n'
@@ -246,11 +250,17 @@ class Window(QMainWindow):
                 '随后登录微信，检查名称及手机是否变化，最后点“结束备注诊断并复制报告”。',
                 QMessageBox.StandardButton.Ok|QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel)!=QMessageBox.StandardButton.Ok: return
+            stage='copy_probe';backend_entered=True
             self.remarks.probe(context,c['username'],data)
+            stage='read_original_remark'
             original=self.remarks.original_name(context,c['username'],data)
+            stage='save_configuration'
             if not restore: self.store.save_remark(self.account,c['username'],original,name)
+            stage='writeback'
             self.remarks.apply(context,c['username'],data,_candidate_trial=True)
+            stage='save_write_history'
             self.store.record_remark(self.account,c['username'],applied=not restore,restored=restore)
+            stage='start_sampling'
             timeline=RemarkTimeline(context.detected_version,name)
             try: current=read_remark(context,c['username'])
             except Exception: current=None
@@ -263,7 +273,46 @@ class Window(QMainWindow):
             self.remark_button.setText('结束备注诊断并复制报告')
             self.status.setText('本机备注缓存已试写，正在只读采集。请登录微信检查显示及手机，再点结束。')
             worker.start()
-        except Exception as exc: self.operation_error(exc)
+        except Exception as exc:
+            self.remark_error(exc,stage,context,self.remarks if backend_entered else None)
+
+    def remark_error(self,exc,stage,context,service):
+        report=remark_failure(exc,version=getattr(context,'detected_version',None),
+                              gui_stage=stage,service=service)
+        text=json.dumps(report,ensure_ascii=False,indent=2)
+        QApplication.clipboard().setText(text)
+        try: (self.store.path.parent/'desktop-remark-error.json').write_text(text,encoding='utf-8')
+        except OSError: pass
+        outcome=report['source_write_outcome']
+        if report['error_category']=='pending_previous_operation':
+            result='本次未写入。发现此前未完成操作，请保持微信关闭，点击“备注故障恢复”。'
+        elif outcome in ('not_entered','not_started','not_written'):
+            result='本次尚未写入微信数据；这个错误本身不代表微信仍在运行，也不代表需要故障恢复。'
+        elif outcome=='rolled_back':
+            result='本次写入失败，已回滚到操作前的数据。'
+        elif outcome=='written_verified':
+            result='数据库已写入并校验；失败发生在后续步骤。请勿反复试写。'
+        else:
+            result='源文件状态尚未确认，请保持微信关闭并使用“备注故障恢复”。'
+        labels={'unsupported_sqlite_tokenizer':'联系人库使用当前引擎不支持的分词器',
+                'unsupported_sqlite_collation':'联系人库使用当前引擎不支持的排序规则',
+                'unsupported_sqlite_module':'联系人库使用当前引擎不支持的扩展表',
+                'wechat_process_still_running':'检测到微信相关进程',
+                'wechat_process_status_unknown':'无法核实微信进程状态',
+                'exclusive_file_lock_failed':'无法取得目标文件独占权限',
+                'filesystem_permission_denied':'文件访问被拒绝',
+                'invalid_desktop_remark':'请输入 1 至 64 个字符，不含换行或控制字符',
+                'unclassified_error':'尚未分类的异常'}
+        category=labels.get(report['error_category'],report['error_category'])
+        box=QMessageBox(self)
+        box.setWindowTitle('备注操作未完成 · 脱敏报告已复制')
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(f'{result}\n阶段：{stage} / {report["backend_stage"]}\n原因：{category}（{report["exception_type"]}）\n\n错误报告已自动复制，回到对话直接粘贴即可。')
+        box.setDetailedText(text)
+        copy=box.addButton('再次复制错误报告',QMessageBox.ButtonRole.ActionRole)
+        box.addButton('关闭',QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton()==copy:QApplication.clipboard().setText(text)
 
     def remark_finished(self):
         worker=self.name_worker;self.name_worker=None

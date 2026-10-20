@@ -137,6 +137,24 @@ def run(output):
             if read_remark(remark_context,'synthetic-contact',_validate=lambda c:None)['name']!='A':
                 raise RuntimeError('remark restore mismatch')
             report['stages'].append('packaged_synthetic_desktop_remark_A_B_A_and_protected_fields')
+            from .errors import remark_failure
+            failure=remark_failure(RuntimeError('synthetic-private-message'),
+                                   version='4.1.15.56',gui_stage='save_write_history',service=remark_service)
+            if failure['source_unchanged_by_this_operation'] or 'synthetic-private-message' in json.dumps(failure):
+                raise RuntimeError('post-write failure scope or redaction mismatch')
+            original=remark_source.read_bytes()
+            def stopped_check_failed(): raise RuntimeError('synthetic-private-process-error')
+            remark_service.guard=stopped_check_failed
+            try:
+                remark_service.probe(remark_context,'synthetic-contact',payload('B'))
+                raise AssertionError('failed process check was ignored')
+            except RuntimeError as exc:
+                failure=remark_failure(exc,version='4.1.15.56',gui_stage='copy_probe',service=remark_service)
+            if failure['source_write_started'] or not failure['source_unchanged_by_this_operation']:
+                raise RuntimeError('pre-write failure scope mismatch')
+            if remark_source.read_bytes()!=original or failure['backend_stage']!='probe_process_check':
+                raise RuntimeError('failure stage or source snapshot mismatch')
+            report['stages'].append('packaged_redacted_error_reports_and_precise_source_outcomes')
         report['ok']=True;code=0
     except Exception as exc:
         report['error_type']=type(exc).__name__
