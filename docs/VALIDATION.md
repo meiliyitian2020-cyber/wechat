@@ -333,3 +333,13 @@ https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39358737025/artifac
 仅 4.1.15.56 新增日常应用入口；4.1.15.65 保持禁止正式写入，不因 UI 整理扩大适配。
 维护菜单保留恢复未完成写入、清除备注配置与验证范围。持久配置路径和表结构不变。
 失效项重新应用支持头像与备注，复用已保存的图片和文字，账号未读取时拒绝写入。
+
+1.0 发布源码 075f51e：本地原有及新增日常应用测试 151 passed、2 skipped；
+随后新增备注重新应用/副本拒绝防写测试，GUI 定向测试 11 passed。
+Windows Actions run 39361416929 SUCCESS（1m45s），通过完整测试、单文件构建及实际 EXE 自检。
+自检改为验证正式备注入口可用、没有可见诊断/试验按钮且不启动诊断线程；
+人工数据库的头像、备注 A→B→A、非 UTF-8 TEXT 保留等后端验证继续保留。
+artifact 12237557176（WeChatLocalProfileEditor-1.0-Windows-x64）：
+https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39361416929/artifacts/12237557176
+正式界面入口尚未在用户电脑重新运行；底层写入策略沿用用户已验收版本。
+前一构建 39361370462 未发布：EXE 自检仍要求旧实验版占位提示；更新为正式界面语义校验后，本次全部通过。
