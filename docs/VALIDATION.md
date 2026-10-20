@@ -269,3 +269,11 @@ https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39236961281/artifac
 FTS5 仅普通读取不一定需要分词器，测试未把“未知分词器必然失败”当作事实。
 以上是重现可能错误类别，不构成对用户真实失败原因的确认；未跳过其他表校验、未注册近似分词器或排序规则。
 新增 Qt 流程测试覆盖检查报错自动复制，以及写入校验后历史保存失败不会误标“原库未改”。
+
+错误诊断版提交 349fa7f：Linux 135 passed、2 skipped；Windows Actions run 39355467268
+SUCCESS（1m44s），通过 Windows 测试、单文件打包和实际 EXE 人工数据自检。
+新增打包自检验证“校验后后续步骤失败”不标未写入，以及“进程核实阶段异常”未写入且阶段准确；
+原头像、备注 A→B→A 和其他字段保护检查保持通过。
+artifact 12235490209（WeChatLocalProfileEditor-Remark-Error-Details）：
+https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39355467268/artifacts/12235490209
+本版只改善可定位性，真实用户报错根因尚未获知；未声称备注显示或远端不同步已修复。
