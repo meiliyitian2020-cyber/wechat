@@ -1,4 +1,4 @@
-name: Windows experimental avatar editor build
+name: Windows release build
 on:
   push:
     branches: [main]
@@ -32,7 +32,7 @@ jobs:
           Get-Content executable-selftest.json
       - uses: actions/upload-artifact@v4
         with:
-          name: WeChatLocalProfileEditor-Raw-Text-Compatibility
+          name: WeChatLocalProfileEditor-1.0-Windows-x64
           path: |
             dist/WeChatLocalProfileEditor.exe
             executable-selftest.json

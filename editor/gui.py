@@ -54,9 +54,10 @@ class Loader(QThread):
                 session.close()
 
 class Window(QMainWindow):
-    def __init__(self, store):
+    def __init__(self, store, *, diagnostics=False):
         super().__init__()
         self.store, self.contacts, self.avatars, self.account = store, [], {}, None
+        self.diagnostics = diagnostics
         self.worker = None
         self.trace_worker = None
         self.name_worker = None
@@ -66,12 +67,12 @@ class Window(QMainWindow):
         self.remarks = OfflineRemark(store.path.parent / 'remark-backups')
         self.expired = []
         self.pending_avatar = None
-        self.setWindowTitle('微信本地身份工具 · 实验性离线头像替换 · 头像与本机备注缓存试验版')
+        self.setWindowTitle('微信本地身份工具 1.0')
         self.resize(1020, 640)
         box = QWidget(); self.setCentralWidget(box)
         layout = QVBoxLayout(box)
         self.info = QLabel('正在识别微信环境……'); layout.addWidget(self.info)
-        layout.addWidget(QLabel('4.1.13.65：实验性写回；4.1.15.56 / 4.1.15.65：先检查副本，通过后可仅本次试验写入。本机备注覆盖为试验功能，手机备注不变尚未验收。'))
+        layout.addWidget(QLabel('头像与备注仅用于本机显示。先读取联系人，再退出微信进行修改。'))
         top = QHBoxLayout(); layout.addLayout(top)
         self.directory = QLineEdit(); self.directory.setPlaceholderText('微信数据根目录（其下包含各账号目录）')
         top.addWidget(self.directory)
@@ -89,26 +90,31 @@ class Window(QMainWindow):
         self.preview = QLabel('原头像'); self.preview.setMinimumSize(128,128); right.addWidget(self.preview)
         self.identity = QLabel('请选择好友'); self.identity.setWordWrap(True); right.addWidget(self.identity)
         self.desired_preview = QLabel('未选择自定义头像'); right.addWidget(self.desired_preview)
-        right.addWidget(QLabel('本机备注覆盖（试验）'))
-        self.name = QLineEdit(); self.name.setPlaceholderText('电脑显示文字 B；手机原备注 A 应保持不变（待验收）'); right.addWidget(self.name)
-        self.remark_button = self.button(right, '本机备注覆盖试验', self.remark_trial)
+        right.addWidget(QLabel('电脑专用备注'))
+        self.name = QLineEdit(); self.name.setPlaceholderText('输入仅在电脑显示的文字'); right.addWidget(self.name)
+        self.remark_button = self.button(right, '应用电脑备注', self.remark_trial)
         self.button(right, '恢复电脑原备注缓存', self.restore_remark)
-        self.button(right, '清除本机备注配置（不恢复微信）', self.clear_remark)
-        self.button(right, '备注故障恢复', self.recover_remark)
         right.addWidget(QLabel('头像替换'))
         self.button(right, '选择新头像', self.choose_image)
         self.button(right, '保存头像配置（不会修改微信）', self.save)
         self.button(right, '应用头像至微信', self.apply)
-        self.button(right, '新版兼容性检查（不写原库）', self.probe)
-        self.button(right, '登录后头像诊断（只读）', self.diagnose_login)
-        self.trace_button = self.button(right, '开始一键诊断（保留字段）', self.guided_trace)
+        self.trace_button = QPushButton('开始一键诊断（保留字段）')
+        self.trace_button.hide()  # Internal diagnostic harness, absent from the normal interface.
         right.addStretch()
         bottom = QHBoxLayout(); layout.addLayout(bottom)
         self.button(bottom, '重新检查配置', self.check)
-        self.button(bottom, '重新应用', lambda: self.reapply_expired() if self.expired else self.apply())
+        self.button(bottom, '重新应用已失效项', self.reapply_expired)
         self.button(bottom, '清除选中配置', self.clear)
         self.button(bottom, '恢复当前真实头像', self.restore)
-        self.button(bottom, '故障恢复', self.recover)
+        maintenance=self.menuBar().addMenu('维护')
+        maintenance.addAction('清除选中好友的备注配置（不恢复微信）', self.clear_remark)
+        maintenance.addAction('恢复未完成的头像写入', self.recover)
+        maintenance.addAction('恢复未完成的备注写入', self.recover_remark)
+        maintenance.addAction('关于与验证范围', lambda: QMessageBox.information(self,'微信本地身份工具 1.0',
+            '微信 4.1.15.56：用户已实测头像和电脑备注生效、重启保留，手机备注未变化。\n'
+            '测试范围为用户选定好友，不保证所有微信界面或未来同步行为。\n'
+            '自动检查验证本机数据库内容，不能自动确认微信实际画面。\n'
+            '数据与备份保存在本机，无后台服务。'))
         self.status = QLabel(); self.status.setWordWrap(True); layout.addWidget(self.status)
         # Every open checks all saved configurations, even accounts not readable now.
         self.check()
@@ -171,7 +177,7 @@ class Window(QMainWindow):
             r = records.get((self.account,c['username']))
             text = f"{c['remark'] or c['nick_name'] or c['username']}\n{c['username']} · " + (f"已配置 / {r['state']}" if r else '未修改')
             remark=remark_records.get((self.account,c['username']))
-            if remark: text+=f" / 本机备注试验：{remark['state']}"
+            if remark: text+=f" / 电脑备注：{remark['state']}"
             item = QListWidgetItem(text); item.setData(Qt.ItemDataRole.UserRole,c)
             pix = QPixmap()
             if self.avatars.get(c['username']):
@@ -232,7 +238,7 @@ class Window(QMainWindow):
         c=self.selected()
         if not c: return
         if not c.get('remark'):
-            QMessageBox.information(self,'没有原备注','请选择已经设置手机备注的测试好友。')
+            QMessageBox.information(self,'没有原备注','请选择已经设置过备注的好友。')
             return
         context=None;stage='configuration';backend_entered=False
         try:
@@ -243,11 +249,9 @@ class Window(QMainWindow):
             name=row['original_name'] if restore else self.name.text().strip()
             stage='validate_input'
             data=remark_payload(name,restore=restore)
-            if not _confirmed and QMessageBox.question(self,'本机备注覆盖试验 · 不同步尚未验证',
-                '请先用测试联系人验收：目标为电脑显示 B、手机保留 A。尚未验证手机备注绝不会变化。\n'
-                '本次只修改本机数据库 remark 缓存，保留原昵称、身份 ID、同步标志和其他记录；不调用官方备注功能。\n'
-                '请完全退出微信（含托盘），再点确定。工具会备份、校验并试写一次。\n'
-                '随后登录微信，检查名称及手机是否变化，最后点“结束备注诊断并复制报告”。',
+            if not _confirmed and QMessageBox.question(self,'恢复电脑备注' if restore else '应用电脑备注',
+                ('将恢复保存的原备注缓存。' if restore else '将保存并应用选定好友的电脑专用备注。') +
+                '\n请完全退出微信（含托盘），再点确定。修改前会自动备份与校验。',
                 QMessageBox.StandardButton.Ok|QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel)!=QMessageBox.StandardButton.Ok: return
             stage='copy_probe';backend_entered=True
@@ -260,6 +264,11 @@ class Window(QMainWindow):
             self.remarks.apply(context,c['username'],data,_candidate_trial=True)
             stage='save_write_history'
             self.store.record_remark(self.account,c['username'],applied=not restore,restored=restore)
+            if not self.diagnostics:
+                self.render()
+                self.status.setText('电脑备注已恢复并校验。请重新启动微信。' if restore else
+                                    '电脑备注已应用并保存。请重新启动微信。')
+                return
             stage='start_sampling'
             timeline=RemarkTimeline(context.detected_version,name)
             try: current=read_remark(context,c['username'])
@@ -366,7 +375,7 @@ class Window(QMainWindow):
     def clear_remark(self):
         c=self.selected()
         if c and QMessageBox.question(self,'仅清除本机备注配置','不会恢复微信缓存。确定清除这个好友的本机备注配置？')==QMessageBox.StandardButton.Yes:
-            self.store.clear_remark(self.account,c['username']);self.name.clear()
+            self.store.clear_remark(self.account,c['username']);self.name.clear();self.render()
 
     def recover_remark(self):
         try:
@@ -488,16 +497,17 @@ class Window(QMainWindow):
             current=remark_observations.get(row['account'],{}).get(row['friend'])
             self.store.record_remark(row['account'],row['friend'],observed=current)
         self.expired=[(a,f) for a,f,state,scope in results if state==State.INVALID]
-        self.status.setText(f'检查 {len(results)} 项配置，发现 {len(self.expired)} 项本地替换已失效。数据库一致也不能证明客户端显示一致。')
+        self.expired_remarks=[(r['account'],r['friend']) for r in self.store.remark_rows() if r['state']==State.INVALID]
+        self.status.setText(f'头像配置 {len(results)} 项，失效 {len(self.expired)} 项。检查范围：本机数据库。')
         if remark_rows:
             changed=sum(r['state']==State.INVALID for r in self.store.remark_rows())
-            self.status.setText(self.status.text()+f' 另有 {len(remark_rows)} 项本机备注试验，{changed} 项缓存变化，手机不变尚未验收。')
+            self.status.setText(self.status.text()+f' 另有 {len(remark_rows)} 项电脑备注，{changed} 项缓存变化。')
         self.render()
-        if self.expired:
+        if self.expired or self.expired_remarks:
             box=QMessageBox(self)
-            box.setWindowTitle('检测到本地头像替换失效')
-            box.setText('检测到以下好友的本地头像已发生变化，是否重新应用之前保存的自定义头像？\n'+
-                        '\n'.join(friend for _,friend in self.expired))
+            box.setWindowTitle('检测到本地头像替换失效' if self.expired else '检测到电脑备注替换失效')
+            box.setText('检测到以下好友的本地替换已发生变化，是否重新应用已保存的配置？\n'+
+                        '\n'.join(dict.fromkeys(friend for _,friend in self.expired+self.expired_remarks)))
             reapply=box.addButton('一键重新应用',QMessageBox.ButtonRole.AcceptRole)
             box.addButton('暂时忽略',QMessageBox.ButtonRole.RejectRole)
             details=box.addButton('查看详情',QMessageBox.ButtonRole.ActionRole)
@@ -527,8 +537,8 @@ class Window(QMainWindow):
         if self.trace_worker and self.trace_worker.isRunning():
             self.status.setText('请先结束诊断，再进行其他写入操作。')
             return False
-        return QMessageBox.question(self,'实验性头像操作',text+
-            '\n请保持本工具打开，完全退出微信（含托盘）后再继续。工具不会自动结束微信。\n会建立加密备份；客户端显示效果仍需确认，昵称不会修改。',
+        return QMessageBox.question(self,'修改微信本机数据',text+
+            '\n请保持本工具打开，完全退出微信（含托盘）后再继续。修改前会自动备份与校验。',
             QMessageBox.StandardButton.Ok|QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel)==QMessageBox.StandardButton.Ok
 
@@ -540,16 +550,16 @@ class Window(QMainWindow):
             QMessageBox.information(self,'请选择头像','先选择一张自定义头像，或选择已有头像配置的好友。');return
         try:
             context=self.context()
-            if context.detected_version not in WRITE_VERSIONS and not candidate_trial:
-                raise OfflineError('此版本默认原始库写入尚未开放。请先运行新版兼容性检查，通过后选择“仅本次试验应用”。')
+            if context.detected_version not in WRITE_VERSIONS | {'4.1.15.56'} and not candidate_trial:
+                raise OfflineError('此版本的正式写入尚未开放，请使用已适配的微信 4.1.15.56。')
             if not self.confirm_write('将替换选定好友在本机头像库中的头像。'): return
             # Persist the selected image before any write so retry never needs upload.
             self.store.save(self.account,c['username'],c['nick_name'] or '',self.avatars.get(c['username']),None,avatar)
-            backup=self.offline.apply(context,c['username'],avatar,_candidate_trial=candidate_trial)
+            self.offline.probe(context,c['username'],avatar)
+            backup=self.offline.apply(context,c['username'],avatar,_candidate_trial=True)
             self.store.record_applied(self.account,c['username'],backup)
             self.render()
-            self.status.setText('加密头像库已写入并校验，备份已保存。现在可启动微信检查会话列表、聊天窗口和资料页；客户端生效尚待确认。')
-            QMessageBox.information(self,'数据库写入完成','仅完成头像数据库写入，实际替换尚未成功验收。请登录微信检查头像；如未变化，保持工具打开，选中该好友点击“登录后头像诊断（只读）”。不要反复写入。')
+            self.status.setText('头像已应用并保存。请重新启动微信。')
         except Exception as exc:
             self.operation_error(exc)
 
@@ -589,8 +599,8 @@ class Window(QMainWindow):
             self.operation_error(exc)
 
     def reapply_expired(self):
-        if not self.expired: return
-        if not self.confirm_write('将复用已保存的头像重新应用。新版会逐个先检查副本，再仅本次试验写回。'): return
+        if not self.expired and not self.expired_remarks: return
+        if not self.confirm_write('将复用已保存的头像和备注重新应用。每项修改前都会自动检查副本。'): return
         records={(r['account'],r['friend']):r for r in self.store.rows()}
         done=0
         try:
@@ -598,12 +608,21 @@ class Window(QMainWindow):
                 context=self.contexts.get(account)
                 if context is None: raise OfflineError('部分账号尚未在本次运行读取，无法取得密钥')
                 record=records[(account,friend)]
-                candidate=context.detected_version not in WRITE_VERSIONS
-                if candidate: self.offline.probe(context,friend,record['desired_avatar'])
-                backup=self.offline.apply(context,friend,record['desired_avatar'],_candidate_trial=candidate)
+                if context.detected_version not in WRITE_VERSIONS | {'4.1.15.56'}:
+                    raise OfflineError('此版本的正式写入尚未开放。')
+                self.offline.probe(context,friend,record['desired_avatar'])
+                backup=self.offline.apply(context,friend,record['desired_avatar'],_candidate_trial=True)
                 self.store.record_applied(account,friend,backup);done+=1
-            self.expired=[];self.render()
-            self.status.setText(f'{done} 项头像库记录已重新应用并校验；请启动微信检查客户端显示。')
+            for account,friend in self.expired_remarks:
+                context=self.name_contexts.get(account)
+                if context is None: raise OfflineError('部分备注账号尚未读取，请先读取该账号联系人')
+                record=next(r for r in self.store.remark_rows() if (r['account'],r['friend'])==(account,friend))
+                data=remark_payload(record['desired_name'])
+                self.remarks.probe(context,friend,data)
+                self.remarks.apply(context,friend,data,_candidate_trial=True)
+                self.store.record_remark(account,friend,applied=True);done+=1
+            self.expired=[];self.expired_remarks=[];self.render()
+            self.status.setText(f'{done} 项替换已重新应用并校验，请重新启动微信。')
         except Exception as exc:
             self.status.setText(f'已重新应用 {done} 项，其余未完成。')
             self.operation_error(exc)
@@ -613,10 +632,11 @@ class Window(QMainWindow):
         if not c: return
         try:
             context=self.context()
-            if context.detected_version not in WRITE_VERSIONS and not candidate_trial:
-                self.probe(_restore=True);return
+            if context.detected_version not in WRITE_VERSIONS | {'4.1.15.56'} and not candidate_trial:
+                raise OfflineError('此版本的正式写入尚未开放。')
             if not self.confirm_write('将清除指定好友在头像库中的缓存记录，让微信尝试重新获取当前头像。不会写回可能过时的原图；工具配置保留。'): return
-            backup=self.offline.invalidate(context,c['username'],_candidate_trial=candidate_trial)
+            self.offline.probe(context,c['username'],None,_invalidate=True)
+            backup=self.offline.invalidate(context,c['username'],_candidate_trial=True)
             self.store.record_invalidated(self.account,c['username'],backup)
             self.render();self.status.setText('指定头像缓存记录已清除。请重启微信等待重新获取头像；其他缓存显示尚未验证。')
         except Exception as exc:

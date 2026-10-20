@@ -11,7 +11,7 @@ def test_chinese_ui_persistence_and_no_success_claim(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     store=Store(tmp_path)
     store.save('a','f','真实昵称',None,'自定义昵称',None)
-    w=Window(store)
+    w=Window(store, diagnostics=True)
     w.loaded(('a',[{'username':'f','nick_name':'真实昵称','remark':'备注'}],{}))
     assert w.items.count()==1
     w.items.setCurrentRow(0)
@@ -48,7 +48,7 @@ def test_guided_diagnostic_reuses_saved_photo_and_copies_report(tmp_path, monkey
     app = QApplication.instance() or QApplication([])
     store = Store(tmp_path)
     store.save('a', 'f', 'name', b'private-original', None, b'private-custom')
-    w = Window(store)
+    w = Window(store, diagnostics=True)
     w.loaded(('a', [{'username':'f', 'nick_name':'name', 'remark':''}], {}))
     w.items.setCurrentRow(0)
     context = SimpleNamespace(detected_version='4.1.15.56')
@@ -92,7 +92,7 @@ def test_desktop_remark_a_b_flow_reuses_config_and_preserves_avatar(tmp_path, mo
     app=QApplication.instance() or QApplication([])
     store=Store(tmp_path)
     store.save('a','f','CCCCC',b'original-avatar',None,b'custom-avatar')
-    w=Window(store)
+    w=Window(store, diagnostics=True)
     w.loaded(('a',[{'username':'f','nick_name':'CCCCC','remark':'A'}],{}))
     w.items.setCurrentRow(0);w.name.setText('B')
     context=SimpleNamespace(detected_version='4.1.15.56')
@@ -132,7 +132,7 @@ def test_remark_probe_error_copies_redacted_report_without_blame_or_recovery_cla
     monkeypatch.setattr(QMessageBox,'question',lambda *args:QMessageBox.StandardButton.Ok)
     monkeypatch.setattr(QMessageBox,'exec',lambda *args:0)
     app=QApplication.instance() or QApplication([])
-    w=Window(Store(tmp_path));w.loaded(('a',[{'username':'f','nick_name':'CCCCC','remark':'A'}],{}))
+    w=Window(Store(tmp_path), diagnostics=True);w.loaded(('a',[{'username':'f','nick_name':'CCCCC','remark':'A'}],{}))
     w.items.setCurrentRow(0);w.name.setText('B')
     monkeypatch.setattr(w,'context',lambda *args:SimpleNamespace(detected_version='4.1.15.56'))
     def fail(*args):
@@ -161,7 +161,7 @@ def test_remark_error_after_verified_write_does_not_claim_source_untouched(tmp_p
     monkeypatch.setattr(QMessageBox,'question',lambda *args:QMessageBox.StandardButton.Ok)
     monkeypatch.setattr(QMessageBox,'exec',lambda *args:0)
     app=QApplication.instance() or QApplication([])
-    w=Window(Store(tmp_path));w.loaded(('a',[{'username':'f','nick_name':'CCCCC','remark':'A'}],{}))
+    w=Window(Store(tmp_path), diagnostics=True);w.loaded(('a',[{'username':'f','nick_name':'CCCCC','remark':'A'}],{}))
     w.items.setCurrentRow(0);w.name.setText('B')
     monkeypatch.setattr(w,'context',lambda *args:SimpleNamespace(detected_version='4.1.15.56'))
     monkeypatch.setattr(w.remarks,'probe',lambda *args:None)
@@ -198,7 +198,7 @@ def test_helper_cleanup_requires_explicit_choice_then_retries_without_bypassing_
     monkeypatch.setattr(QMessageBox,'exec',choose)
     monkeypatch.setattr(QMessageBox,'clickedButton',lambda self:chosen[-1])
     app=QApplication.instance() or QApplication([])
-    w=Window(Store(tmp_path));w.loaded(('a',[{'username':'f','nick_name':'CCCCC','remark':'A'}],{}))
+    w=Window(Store(tmp_path), diagnostics=True);w.loaded(('a',[{'username':'f','nick_name':'CCCCC','remark':'A'}],{}))
     w.items.setCurrentRow(0);w.name.setText('B')
     context=SimpleNamespace(detected_version='4.1.15.56',executable=tmp_path/'installation'/'Weixin.exe')
     monkeypatch.setattr(w,'context',lambda *args:context)
@@ -238,8 +238,81 @@ def test_main_process_never_offers_forced_cleanup(tmp_path,monkeypatch):
     monkeypatch.setattr(QMessageBox,'exec',close)
     monkeypatch.setattr(QMessageBox,'clickedButton',lambda self:chosen[-1])
     app=QApplication.instance() or QApplication([])
-    w=Window(Store(tmp_path))
+    w=Window(Store(tmp_path), diagnostics=True)
     error=WechatRunningError([BlockingProcess(123,'weixin.exe',1.5),BlockingProcess(124,'wechatappex.exe',1.5)])
     w.remark_error(error,'copy_probe',SimpleNamespace(detected_version='4.1.15.56'),None,
                    retry=lambda:(_ for _ in ()).throw(AssertionError('retry without user choice')))
+    assert w.close()
+
+
+def test_release_remark_applies_without_sampler_or_clipboard(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QMessageBox, QPushButton
+    from editor.local_remark import decode
+    monkeypatch.setattr('editor.gui.discover',lambda:(_ for _ in ()).throw(RuntimeError('synthetic')))
+    monkeypatch.setattr(QMessageBox,'question',lambda *args:QMessageBox.StandardButton.Ok)
+    app=QApplication.instance() or QApplication([])
+    w=Window(Store(tmp_path));w.loaded(('a',[{'username':'f','nick_name':'C','remark':'A'}],{}))
+    w.items.setCurrentRow(0);w.name.setText('B')
+    app.clipboard().setText('keep clipboard')
+    monkeypatch.setattr(w,'context',lambda *args:SimpleNamespace(detected_version='4.1.15.56'))
+    calls=[]
+    monkeypatch.setattr(w.remarks,'probe',lambda c,f,d:calls.append(('probe',decode(d))))
+    monkeypatch.setattr(w.remarks,'original_name',lambda *args:'A')
+    monkeypatch.setattr(w.remarks,'apply',lambda c,f,d,**kw:calls.append(('apply',decode(d))))
+    monkeypatch.setattr('editor.gui.LoginTrace',lambda *a,**kw:(_ for _ in ()).throw(AssertionError('release started sampler')))
+    w.remark_trial()
+    assert calls==[('probe','B'),('apply','B')]
+    assert w.name_worker is None and app.clipboard().text()=='keep clipboard'
+    assert w.store.remark_rows()[0]['last_applied']
+    assert not (tmp_path/'desktop-remark-diagnostic.json').exists()
+    w.show();app.processEvents()
+    labels=[b.text() for b in w.findChildren(QPushButton) if b.isVisible()]
+    assert '应用电脑备注' in labels
+    assert not any('诊断' in x or '试验' in x or '兼容性' in x for x in labels)
+    assert w.close()
+
+
+def test_release_avatar_automatically_probes_before_write(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr('editor.gui.discover',lambda:(_ for _ in ()).throw(RuntimeError('synthetic')))
+    app=QApplication.instance() or QApplication([])
+    w=Window(Store(tmp_path));w.loaded(('a',[{'username':'f','nick_name':'C','remark':'A'}],{}))
+    w.items.setCurrentRow(0);w.pending_avatar=b'custom'
+    monkeypatch.setattr(w,'context',lambda *args:SimpleNamespace(detected_version='4.1.15.56'))
+    monkeypatch.setattr(w,'confirm_write',lambda *args:True)
+    calls=[]
+    monkeypatch.setattr(w.offline,'probe',lambda *args:calls.append('probe'))
+    def apply(*args,**kwargs):
+        assert kwargs['_candidate_trial'] is True
+        calls.append('apply');return 'backup'
+    monkeypatch.setattr(w.offline,'apply',apply)
+    w.apply()
+    assert calls==['probe','apply'] and w.store.rows()[0]['last_applied']
+    assert w.trace_worker is None
+    assert w.close()
+
+
+def test_release_reapply_reuses_saved_remark_and_requires_probe(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from editor.local_remark import decode
+    monkeypatch.setattr('editor.gui.discover',lambda:(_ for _ in ()).throw(RuntimeError('synthetic')))
+    app=QApplication.instance() or QApplication([])
+    store=Store(tmp_path);store.save_remark('a','f','A','B')
+    w=Window(store);w.expired_remarks=[('a','f')]
+    w.name_contexts['a']=SimpleNamespace(detected_version='4.1.15.56')
+    monkeypatch.setattr(w,'confirm_write',lambda *a:True)
+    calls=[]
+    monkeypatch.setattr(w.remarks,'probe',lambda c,f,d:calls.append(('probe',f,decode(d))))
+    monkeypatch.setattr(w.remarks,'apply',lambda c,f,d,**kw:calls.append(('apply',f,decode(d))))
+    w.reapply_expired()
+    assert calls==[('probe','f','B'),('apply','f','B')]
+    assert store.remark_rows()[0]['last_applied'] and not w.expired_remarks
+    w.expired_remarks=[('a','f')];calls.clear()
+    def refused(*args): raise RuntimeError('probe refused')
+    monkeypatch.setattr(w.remarks,'probe',refused)
+    monkeypatch.setattr(w,'operation_error',lambda *args:None)
+    w.reapply_expired()
+    assert calls==[] and w.expired_remarks==[('a','f')]
     assert w.close()
