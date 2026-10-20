@@ -293,3 +293,11 @@ source_write_started=false。这确认守卫检测到了名单内进程，原报
 模拟进程单元测试覆盖主程序保护、所有目标预先核验、其他安装、PID 重用、新进程、主程序重启、
 权限不明、用户默认关闭及明确点击后先处理再重新 probe。测试不终止任何真实微信进程。
 本轮尚未在用户 Windows 上验证具体残留进程名称或实际处理效果；备注手机不变仍未验收。
+
+残留进程处理版 0f5dbb8：Linux 145 passed、2 skipped；Windows Actions run 39356749770
+SUCCESS（1m35s），通过 Windows 测试、单文件打包和实际 EXE 人工数据自检。
+打包新增检查进程报告仅含白名单名称/PID/角色、拒绝把主程序作为结束目标；
+没有在构建机结束真实微信进程。附属进程处理与重试逻辑使用模拟进程和 Qt 流程验证。
+artifact 12235582893（WeChatLocalProfileEditor-Residual-Process-Handler）：
+https://github.com/meiliyitian2020-cyber/wechat/actions/runs/39356749770/artifacts/12235582893
+用户当前拦截进程的具体名单、实际附属组件退出效果与备注远端不同步仍待实测。
